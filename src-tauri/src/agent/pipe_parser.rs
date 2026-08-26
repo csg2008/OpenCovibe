@@ -305,6 +305,7 @@ impl CodexStdoutParser {
             cache_read_tokens: if cached > 0 { Some(cached) } else { None },
             cache_write_tokens: None,
             total_cost_usd: 0.0, // Codex doesn't provide cost
+            cost_available: false,
             turn_index: Some(self.turn_counter),
             model_usage: None,
             duration_api_ms: None,

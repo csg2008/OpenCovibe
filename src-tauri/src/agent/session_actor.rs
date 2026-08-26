@@ -424,6 +424,8 @@ pub fn spawn_actor(
     // Codex app-server transport: the driver + its handshake messages. `None`/empty = Claude.
     codex: Option<CodexAppServer>,
     codex_startup: Vec<Value>,
+    // Provider preset for USD estimation. None means native CLI-managed billing.
+    pricing_provider_id: Option<String>,
     // User turn hard timeout (None = disabled, resolved from timeout_minutes at spawn).
     user_hard_timeout: Option<Duration>,
 ) -> SessionActorHandle {
@@ -440,12 +442,14 @@ pub fn spawn_actor(
         user_hard_timeout
     );
 
+    let mut protocol = ProtocolState::new(is_resume);
+    protocol.set_pricing_provider_id(pricing_provider_id);
     let actor = SessionActor {
         emitter,
         sessions,
         run_id: run_id.clone(),
         tag: tag.clone(),
-        protocol: ProtocolState::new(is_resume),
+        protocol,
         codex,
         codex_startup,
         codex_ready: false,
@@ -927,7 +931,7 @@ impl SessionActor {
             soft_deadline: now + USER_SOFT_TIMEOUT,
             // None (timeout disabled) falls back to the default deadline — the
             // tick gate (user_hard_timeout.is_some()) keeps it from ever firing.
-            hard_deadline: now + self.user_hard_timeout.map_or(USER_HARD_TIMEOUT, |d| d),
+            hard_deadline: now + self.user_hard_timeout.unwrap_or(USER_HARD_TIMEOUT),
             turn_index: ticket.turn_index,
         });
     }
@@ -1094,7 +1098,7 @@ impl SessionActor {
             soft_deadline: now + USER_SOFT_TIMEOUT,
             // None (timeout disabled) falls back to the default deadline — the
             // tick gate (user_hard_timeout.is_some()) keeps it from ever firing.
-            hard_deadline: now + self.user_hard_timeout.map_or(USER_HARD_TIMEOUT, |d| d),
+            hard_deadline: now + self.user_hard_timeout.unwrap_or(USER_HARD_TIMEOUT),
             turn_index,
         });
 

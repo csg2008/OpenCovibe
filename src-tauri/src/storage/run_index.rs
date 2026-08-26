@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Instant;
 
-const MANIFEST_VERSION: u32 = 1;
+const MANIFEST_VERSION: u32 = 3;
 const CACHE_TTL_SECS: u64 = 120;
 
 // ── Types ──
@@ -35,6 +35,8 @@ pub struct RunIndexEntry {
     pub tool_call_count: u32,
     pub files_touched: Vec<String>,
     pub total_cost_usd: f64,
+    #[serde(default = "default_true")]
+    pub cost_available: bool,
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub duration_ms: u64,
@@ -42,6 +44,10 @@ pub struct RunIndexEntry {
     pub error_summary: Option<String>,
     pub has_errors: bool,
     pub permission_denied_count: u32,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// Manifest: tracks fingerprints per run to enable incremental updates.
@@ -165,10 +171,9 @@ pub fn scan_run(run_id: &str, events_path: &Path, meta_json: &serde_json::Value)
     let mut error_summary: Option<String> = None;
     let mut permission_denied_count: u32 = 0;
 
-    // Cost: detect per-turn vs cumulative based on source field.
-    // CLI imports have per-turn cost (no num_turns), native sessions have cumulative cost.
-    let is_per_turn_cost = meta_json.get("source").and_then(|v| v.as_str()) == Some("cli_import");
+    let is_per_turn_usage = super::events::usage_events_are_per_turn(meta_json);
     let mut total_cost: f64 = 0.0;
+    let mut cost_available = true;
     let mut prev_cost: f64 = 0.0;
     let mut peak_cost: f64 = 0.0;
     let mut last_input: u64 = 0;
@@ -269,9 +274,17 @@ pub fn scan_run(run_id: &str, events_path: &Path, meta_json: &serde_json::Value)
                         .get("total_cost_usd")
                         .and_then(|v| v.as_f64())
                         .unwrap_or(0.0);
+                    cost_available &= event
+                        .get("cost_available")
+                        .and_then(|value| value.as_bool())
+                        .unwrap_or_else(|| {
+                            // Legacy native Codex events used $0 as "not supplied".
+                            meta_json.get("agent").and_then(|value| value.as_str()) != Some("codex")
+                                || cost > 0.0
+                        });
 
-                    if is_per_turn_cost {
-                        // CLI imports: total_cost_usd is per-turn, sum directly
+                    if is_per_turn_usage {
+                        // CLI imports and Codex exec carry per-turn deltas.
                         total_cost += cost;
                     } else {
                         // Native sessions: total_cost_usd is cumulative, use peak detection
@@ -285,8 +298,7 @@ pub fn scan_run(run_id: &str, events_path: &Path, meta_json: &serde_json::Value)
                         prev_cost = cost;
                     }
 
-                    // Tokens: for per-turn cost, sum them; for cumulative, take last
-                    if is_per_turn_cost {
+                    if is_per_turn_usage {
                         last_input += event
                             .get("input_tokens")
                             .and_then(|v| v.as_u64())
@@ -337,7 +349,7 @@ pub fn scan_run(run_id: &str, events_path: &Path, meta_json: &serde_json::Value)
     }
 
     // Add final segment's peak cost (only for cumulative mode)
-    if !is_per_turn_cost {
+    if !is_per_turn_usage {
         total_cost += peak_cost;
     }
 
@@ -375,6 +387,7 @@ pub fn scan_run(run_id: &str, events_path: &Path, meta_json: &serde_json::Value)
         tool_call_count,
         files_touched,
         total_cost_usd: total_cost,
+        cost_available,
         input_tokens: last_input,
         output_tokens: last_output,
         duration_ms: final_duration,
@@ -698,6 +711,51 @@ mod tests {
         assert_eq!(entry.output_tokens, 150);
         assert_eq!(entry.duration_ms, 6000); // sum of duration_ms
         assert_eq!(entry.num_turns, 3);
+        assert!(entry.cost_available);
+    }
+
+    #[test]
+    fn test_scan_preserves_unavailable_cost() {
+        let events = write_events_file(&[
+            r#"{"_bus":true,"seq":1,"ts":"2024-01-01T00:00:00.000Z","event":{"type":"usage_update","total_cost_usd":0.0,"cost_available":false,"input_tokens":100,"output_tokens":50}}"#,
+        ]);
+        let meta = make_meta(&serde_json::json!({}));
+
+        assert!(!scan_run("test", events.path(), &meta).cost_available);
+    }
+
+    #[test]
+    fn codex_usage_semantics_follow_execution_path() {
+        let events = write_events_file(&[
+            r#"{"_bus":true,"seq":1,"event":{"type":"usage_update","total_cost_usd":0.0,"cost_available":false,"input_tokens":100,"output_tokens":10}}"#,
+            r#"{"_bus":true,"seq":2,"event":{"type":"usage_update","total_cost_usd":0.0,"cost_available":false,"input_tokens":150,"output_tokens":20}}"#,
+        ]);
+        let app_server = make_meta(&serde_json::json!({
+            "agent": "codex",
+            "execution_path": "session_actor"
+        }));
+        let exec = make_meta(&serde_json::json!({
+            "agent": "codex",
+            "execution_path": "pipe_exec"
+        }));
+
+        let cumulative = scan_run("test", events.path(), &app_server);
+        assert_eq!(
+            (cumulative.input_tokens, cumulative.output_tokens),
+            (150, 20)
+        );
+        let per_turn = scan_run("test", events.path(), &exec);
+        assert_eq!((per_turn.input_tokens, per_turn.output_tokens), (250, 30));
+    }
+
+    #[test]
+    fn legacy_codex_zero_cost_is_unavailable() {
+        let events = write_events_file(&[
+            r#"{"_bus":true,"seq":1,"event":{"type":"usage_update","total_cost_usd":0.0,"input_tokens":100,"output_tokens":10}}"#,
+        ]);
+        let meta = make_meta(&serde_json::json!({ "agent": "codex" }));
+
+        assert!(!scan_run("test", events.path(), &meta).cost_available);
     }
 
     #[test]

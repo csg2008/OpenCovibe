@@ -4,6 +4,7 @@
   import {
     buildPlatformList,
     findCredential,
+    platformHasConfiguredAuth,
     PRESET_CATEGORIES,
   } from "$lib/utils/platform-presets";
   import ProviderIcon from "$lib/components/ProviderIcon.svelte";
@@ -28,7 +29,7 @@
 
   let platforms = $derived(buildPlatformList(credentials));
   let displayName = $derived(platforms.find((p) => p.id === value)?.name ?? value);
-  let hasKey = $derived(!!findCredential(credentials, value)?.api_key);
+  let hasKey = $derived(platformHasConfiguredAuth(credentials, value));
   let selectedCategory = $derived(platforms.find((p) => p.id === value)?.category);
   // Show "no API key" warning for non-local providers that have no key configured
   // (anthropic uses CLI auth so it's excluded)
@@ -132,7 +133,7 @@
           </div>
           {#each group.items as platform}
             {@const saved = findCredential(credentials, platform.id)}
-            {@const platformHasKey = !!saved?.api_key}
+            {@const platformHasKey = platform.id === "bedrock" || !!saved?.api_key}
             <button
               class="flex w-full items-center gap-2 rounded-sm px-3 py-1.5 text-sm hover:bg-accent transition-colors
                 {value === platform.id ? 'bg-accent font-medium' : ''}"
@@ -141,9 +142,11 @@
               <ProviderIcon id={platform.id} name={platform.name} size="sm" />
               <span class="flex-1 min-w-0 truncate">{platform.name}</span>
               <span
-                class="h-1.5 w-1.5 rounded-full shrink-0 {platformHasKey
-                  ? 'bg-green-500'
-                  : 'bg-muted-foreground/30'}"
+                class="h-1.5 w-1.5 rounded-full shrink-0 {platform.id === 'bedrock'
+                  ? 'bg-blue-500'
+                  : platformHasKey
+                    ? 'bg-green-500'
+                    : 'bg-muted-foreground/30'}"
               ></span>
               {#if value === platform.id}
                 <svg

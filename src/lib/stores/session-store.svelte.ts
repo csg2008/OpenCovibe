@@ -379,6 +379,7 @@ export class SessionStore {
     cacheReadTokens: 0,
     cacheWriteTokens: 0,
     cost: 0,
+    costAvailable: true,
   });
   model: string = $state("");
   error: string = $state("");
@@ -1652,6 +1653,7 @@ export class SessionStore {
       cacheReadTokens: 0,
       cacheWriteTokens: 0,
       cost: 0,
+      costAvailable: true,
     };
     this.model = "";
     this.error = "";
@@ -2078,8 +2080,15 @@ export class SessionStore {
       this.streamingText = (obj.streamingText as string) ?? "";
       this.thinkingText = (obj.thinkingText as string) ?? "";
       this.model = (obj.model as string) ?? "";
-      this.usage = obj.usage as UsageState;
-      this.turnUsages = (obj.turnUsages ?? []) as TurnUsage[];
+      const snapshotUsage = obj.usage as UsageState;
+      this.usage = {
+        ...snapshotUsage,
+        costAvailable: snapshotUsage.costAvailable ?? true,
+      };
+      this.turnUsages = ((obj.turnUsages ?? []) as TurnUsage[]).map((usage) => ({
+        ...usage,
+        costAvailable: usage.costAvailable ?? true,
+      }));
       this.contextHwTokens = (obj.contextHwTokens as number) ?? 0;
       this.contextHwWindow = (obj.contextHwWindow as number) ?? 0;
       this.lastReqContextTokens = (obj.lastReqContextTokens as number) ?? 0;
@@ -4047,6 +4056,7 @@ export class SessionStore {
           cacheReadTokens: ev.cache_read_tokens ?? 0,
           cacheWriteTokens: ev.cache_write_tokens ?? 0,
           cost: ev.total_cost_usd,
+          costAvailable: ev.cost_available ?? true,
           modelUsage: ev.model_usage,
           durationApiMs: ev.duration_api_ms,
         };
@@ -4058,7 +4068,13 @@ export class SessionStore {
           u.outputTokens > 0 ||
           u.cacheReadTokens > 0 ||
           u.cacheWriteTokens > 0;
-        const merged = hasTokens ? u : { ...prev, cost: Math.max(prev.cost, u.cost) };
+        const merged = hasTokens
+          ? u
+          : {
+              ...prev,
+              cost: Math.max(prev.cost, u.cost),
+              costAvailable: prev.costAvailable && u.costAvailable,
+            };
         // Preserve modelUsage/durationApiMs even on zero-token update (error results may still have them)
         if (!hasTokens && u.modelUsage) merged.modelUsage = u.modelUsage;
         if (!hasTokens && u.durationApiMs) merged.durationApiMs = u.durationApiMs;
@@ -4086,6 +4102,7 @@ export class SessionStore {
           cacheReadTokens: u.cacheReadTokens,
           cacheWriteTokens: u.cacheWriteTokens,
           cost: u.cost,
+          costAvailable: u.costAvailable,
           durationApiMs: u.durationApiMs,
           durationMs: ev.duration_ms,
         };

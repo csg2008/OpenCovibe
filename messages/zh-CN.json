@@ -1,4 +1,5 @@
 {
+  "auth_awsCredentials": "AWS 凭证",
   "settings_title": "设置",
 
   "settings_tab_general": "通用",
@@ -23,6 +24,17 @@
   "settings_general_show": "显示",
   "settings_general_hide": "隐藏",
   "settings_general_apiKeyStored": "本地存储在 ~/.opencovibe/settings.json",
+  "settings_bedrock_apiKey": "Bedrock API 密钥（可选）",
+  "settings_bedrock_apiKeyHelp": "留空时使用 AWS 默认凭据链或所选配置文件。",
+  "settings_bedrock_region": "AWS 区域",
+  "settings_bedrock_profile": "AWS 配置文件（可选）",
+  "settings_bedrock_serviceTier": "服务层级",
+  "settings_bedrock_credentialsHelp": "AWS 配置文件与默认凭据链在运行 Claude 的机器上解析。",
+  "settings_bedrock_modelPlaceholder": "推理配置文件 ID 或模型 ID",
+  "settings_bedrock_codexRequired": "需要填写 Bedrock API 密钥以及推理配置文件或模型。",
+  "settings_bedrock_modelRegionHelp": "模型与推理配置文件的可用性取决于 AWS 账户和区域。更改区域后请核对这些 ID。",
+  "settings_bedrock_managedEnvHelp": "上方字段管理的 Bedrock 变量已在此隐藏；这里只需添加其他 CLI 环境变量。",
+  "settings_bedrock_codexAuthHelp": "此处 Codex 不使用 AWS 配置文件或默认凭据链。必须提供 Bedrock API 密钥，并以 AWS_BEARER_TOKEN_BEDROCK 注入。",
   "settings_general_baseUrl": "基础 URL",
   "settings_general_baseUrlHelp": "留空使用官方 Anthropic API。设置代理或 OpenAI 兼容端点时填写。",
   "settings_general_models": "模型",

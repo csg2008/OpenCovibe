@@ -44,7 +44,7 @@
   let maxDailyValue = $derived.by(() => {
     if (!data?.daily.length) return 1;
     if (chartMode === "cost") {
-      return Math.max(...data.daily.map((d) => d.costUsd), 0.01);
+      return Math.max(...data.daily.map((d) => (d.costComplete ? d.costUsd : 0)), 0.01);
     }
     if (chartMode === "messages") {
       return Math.max(...data.daily.map((d) => d.messageCount ?? 0), 1);
@@ -200,7 +200,7 @@
   }
 
   function getDailyValue(day: DailyAggregate): number {
-    if (chartMode === "cost") return day.costUsd;
+    if (chartMode === "cost") return day.costComplete ? day.costUsd : 0;
     if (chartMode === "messages") return day.messageCount ?? 0;
     if (chartMode === "sessions") return day.sessionCount ?? 0;
     return day.inputTokens + day.outputTokens;
@@ -208,7 +208,8 @@
 
   function getDailyTooltip(day: DailyAggregate): string {
     const date = day.date;
-    if (chartMode === "cost") return `${date}\n${formatCost(day.costUsd)}`;
+    if (chartMode === "cost")
+      return `${date}\n${day.costComplete ? formatCost(day.costUsd) : "\u2014"}`;
     if (chartMode === "messages")
       return `${date}\n${t("usage_tooltipMessages", { count: fmtNumber(day.messageCount ?? 0) })}`;
     if (chartMode === "sessions")
@@ -339,7 +340,9 @@
     <!-- Summary cards -->
     <div class="grid grid-cols-2 gap-4 sm:grid-cols-4">
       <Card class="p-4 text-center">
-        <p class="text-2xl font-bold">{formatCost(data.totalCostUsd)}</p>
+        <p class="text-2xl font-bold">
+          {data.costComplete ? formatCost(data.totalCostUsd) : "\u2014"}
+        </p>
         <p class="text-xs text-muted-foreground mt-1">{t("usage_totalCost")}</p>
       </Card>
       <Card class="p-4 text-center">
@@ -539,20 +542,24 @@
                     {formatTokenCount(modelRow.cacheWriteTokens)}
                   </td>
                   <td class="py-2 text-right tabular-nums font-mono text-xs">
-                    {formatCost(modelRow.costUsd)}
+                    {modelRow.costComplete ? formatCost(modelRow.costUsd) : "\u2014"}
                   </td>
                   <td class="py-2 text-right">
-                    <div class="flex items-center justify-end gap-2">
-                      <div class="w-12 h-1.5 bg-muted rounded-full overflow-hidden">
-                        <div
-                          class="h-full bg-primary rounded-full"
-                          style="width: {Math.min(modelRow.pct, 100)}%"
-                        ></div>
+                    {#if data.costComplete && modelRow.costComplete}
+                      <div class="flex items-center justify-end gap-2">
+                        <div class="w-12 h-1.5 bg-muted rounded-full overflow-hidden">
+                          <div
+                            class="h-full bg-primary rounded-full"
+                            style="width: {Math.min(modelRow.pct, 100)}%"
+                          ></div>
+                        </div>
+                        <span class="text-xs tabular-nums text-muted-foreground w-8 text-right">
+                          {modelRow.pct.toFixed(0)}%
+                        </span>
                       </div>
-                      <span class="text-xs tabular-nums text-muted-foreground w-8 text-right">
-                        {modelRow.pct.toFixed(0)}%
-                      </span>
-                    </div>
+                    {:else}
+                      <span class="text-xs text-muted-foreground">\u2014</span>
+                    {/if}
                   </td>
                 </tr>
               {/each}
@@ -633,7 +640,9 @@
                       class="py-2 text-right tabular-nums font-mono text-xs"
                       title={run.costEstimated ? "Estimated from token count" : undefined}
                     >
-                      {formatCost(run.totalCostUsd)}{#if run.costEstimated}<span
+                      {run.costAvailable
+                        ? formatCost(run.totalCostUsd)
+                        : "\u2014"}{#if run.costEstimated}<span
                           class="text-[9px] text-muted-foreground/50 ml-0.5">~</span
                         >{/if}
                     </td>

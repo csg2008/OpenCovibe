@@ -170,7 +170,7 @@ pub struct TaskRun {
     /// Snapshot of remote working directory at run creation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote_cwd: Option<String>,
-    /// Snapshot of active_platform_id at run creation time.
+    /// Snapshot of the Claude platform or Codex model-provider ID at run creation time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub platform_id: Option<String>,
     /// Snapshot of anthropic_base_url at run creation time.
@@ -564,7 +564,7 @@ pub struct RunMeta {
     /// Falls back to name-based lookup for old runs that don't have this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote_host_snapshot: Option<RemoteHost>,
-    /// Snapshot of active_platform_id at run creation time.
+    /// Snapshot of the Claude platform or Codex model-provider ID at run creation time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub platform_id: Option<String>,
     /// Snapshot of anthropic_base_url at run creation time.
@@ -843,6 +843,7 @@ pub struct SystemDiagnostics {
 #[derive(Debug, Clone, Default)]
 pub struct RawRunUsage {
     pub total_cost_usd: f64,
+    pub cost_available: bool,
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub cache_read_tokens: u64,
@@ -864,6 +865,8 @@ pub struct RunUsageSummary {
     pub started_at: String,
     pub ended_at: Option<String>,
     pub total_cost_usd: f64,
+    #[serde(default = "default_true")]
+    pub cost_available: bool,
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub cache_read_tokens: u64,
@@ -892,6 +895,8 @@ pub struct ModelUsageSummary {
 #[serde(rename_all = "camelCase")]
 pub struct UsageOverview {
     pub total_cost_usd: f64,
+    #[serde(default = "default_true")]
+    pub cost_complete: bool,
     pub total_tokens: u64,
     pub total_runs: u32,
     pub avg_cost_per_run: f64,
@@ -923,6 +928,8 @@ pub struct ModelAggregate {
     pub cache_read_tokens: u64,
     pub cache_write_tokens: u64,
     pub cost_usd: f64,
+    #[serde(default = "default_true")]
+    pub cost_complete: bool,
     pub pct: f64,
 }
 
@@ -932,6 +939,8 @@ pub struct ModelAggregate {
 pub struct DailyAggregate {
     pub date: String,
     pub cost_usd: f64,
+    #[serde(default = "default_true")]
+    pub cost_complete: bool,
     pub runs: u32,
     pub input_tokens: u64,
     pub output_tokens: u64,
@@ -1214,6 +1223,9 @@ pub enum BusEvent {
         cache_read_tokens: Option<u64>,
         cache_write_tokens: Option<u64>,
         total_cost_usd: f64,
+        /// False when token usage is known but its USD price cannot be reconstructed.
+        #[serde(default = "default_true")]
+        cost_available: bool,
         /// Backend-authoritative turn index (1-based). Injected by session_actor for user turns.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         turn_index: Option<u32>,
@@ -2090,6 +2102,7 @@ pub struct RunSearchResult {
     pub tool_call_count: u32,
     pub files_touched_count: u32,
     pub total_cost_usd: f64,
+    pub cost_available: bool,
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub duration_ms: u64,
@@ -2117,6 +2130,7 @@ pub struct RunSearchFacets {
     pub date_range: [String; 2],
     pub total_runs: usize,
     pub total_cost: f64,
+    pub cost_complete: bool,
 }
 
 /// History 搜索响应（结果 + facets + 总数）

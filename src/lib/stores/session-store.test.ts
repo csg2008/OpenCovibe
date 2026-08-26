@@ -756,6 +756,7 @@ describe("SessionStore reducer", () => {
         cacheReadTokens: 800,
         cacheWriteTokens: 40,
         cost: 0.01,
+        costAvailable: true,
       };
       expect(store.totalTokens).toBe(900);
     });
@@ -3884,6 +3885,23 @@ describe("SessionStore reducer", () => {
   // ── Per-model usage (#4) ──
 
   describe("per-model usage (model_usage + duration_api_ms)", () => {
+    it("preserves unavailable pricing instead of treating zero as free", () => {
+      store.run = makeRun("run-1");
+      store.phase = "running";
+      store.applyEvent({
+        type: "usage_update",
+        run_id: "run-1",
+        input_tokens: 500,
+        output_tokens: 100,
+        total_cost_usd: 0,
+        cost_available: false,
+      });
+
+      expect(store.usage.cost).toBe(0);
+      expect(store.usage.costAvailable).toBe(false);
+      expect(store.turnUsages[0].costAvailable).toBe(false);
+    });
+
     it("stores modelUsage and durationApiMs from usage_update", () => {
       store.run = makeRun("run-1");
       store.phase = "running";
@@ -3994,6 +4012,7 @@ describe("SessionStore reducer", () => {
         cacheReadTokens: 0,
         cacheWriteTokens: 0,
         cost: 0.05,
+        costAvailable: true,
         modelUsage: {
           "claude-sonnet-4-5-20250929": {
             input_tokens: 500,

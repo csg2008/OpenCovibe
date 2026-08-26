@@ -107,6 +107,32 @@ struct ResolvedAuth {
     extra_env: Option<std::collections::HashMap<String, String>>,
 }
 
+pub(crate) fn is_bedrock_env(
+    extra_env: Option<&std::collections::HashMap<String, String>>,
+) -> bool {
+    extra_env
+        .and_then(|env| env.get("CLAUDE_CODE_USE_BEDROCK"))
+        .is_some_and(|value| value == "1")
+}
+
+fn resolve_bedrock_auth(
+    key: Option<String>,
+    models: Option<Vec<String>>,
+    mut extra_env: std::collections::HashMap<String, String>,
+) -> ResolvedAuth {
+    // Bedrock API keys are bearer tokens consumed by the AWS SDK, not Anthropic API credentials.
+    if let Some(key) = key {
+        extra_env.insert("AWS_BEARER_TOKEN_BEDROCK".to_string(), key);
+    }
+    ResolvedAuth {
+        api_key: None,
+        auth_token: None,
+        base_url: None,
+        models,
+        extra_env: Some(extra_env),
+    }
+}
+
 /// Resolve models array into (env_key, env_value) pairs for CLI injection.
 /// 1 model  → all tiers same
 /// 2 models → [0]=Opus+Sonnet, [1]=Haiku
@@ -387,6 +413,20 @@ fn resolve_auth_env_for_platform(
             let models = cred.models.clone().filter(|m| !m.is_empty());
             let extra_env = cred.extra_env.clone();
 
+            if pid == "bedrock" {
+                let info = storage::settings::get_provider_info(pid)
+                    .expect("bedrock provider defaults must exist");
+                let effective_models = models.or(info.models).filter(|m| !m.is_empty());
+                let mut effective_extra = info.extra_env.unwrap_or_default();
+                effective_extra.extend(extra_env.unwrap_or_default());
+                log::info!(
+                    "[session] platform 'bedrock': using AWS credential chain (api_key={}, profile={})",
+                    key.is_some(),
+                    effective_extra.contains_key("AWS_PROFILE")
+                );
+                return resolve_bedrock_auth(key, effective_models, effective_extra);
+            }
+
             if let Some(k) = key {
                 log::debug!(
                     "[session] resolve_auth_env_for_platform: platform={}, use_bearer={}, has_base_url={}, models={:?}, extra_env_count={}",
@@ -457,6 +497,16 @@ fn resolve_auth_env_for_platform(
         } else {
             // No credential entry — check if key_optional platform with known defaults
             if let Some(info) = storage::settings::get_provider_info(pid) {
+                if pid == "bedrock" {
+                    log::info!(
+                        "[session] platform 'bedrock': no credential entry, using AWS default credential chain"
+                    );
+                    return resolve_bedrock_auth(
+                        None,
+                        info.models.filter(|m| !m.is_empty()),
+                        info.extra_env.unwrap_or_default(),
+                    );
+                }
                 if info.key_optional {
                     let use_bearer = info.auth_env_var.as_deref() == Some("ANTHROPIC_AUTH_TOKEN");
                     let models = info.models.clone().filter(|m| !m.is_empty());
@@ -740,6 +790,7 @@ pub(crate) async fn start_session_impl(
         initial_auto_ctx_id,
         codex,
         codex_startup,
+        effective_pid.map(str::to_string),
         user_hard_timeout,
     );
     let cmd_tx = actor_handle.cmd_tx.clone();
@@ -1461,6 +1512,7 @@ pub(crate) async fn approve_session_tool_impl(
         normal + 1,
         None, // Claude transport
         vec![],
+        effective_pid.map(str::to_string),
         user_hard_timeout,
     );
     sessions.lock().await.insert(run_id.clone(), actor_handle);
@@ -1860,6 +1912,9 @@ fn augment_with_shell_auth(
     is_remote: bool,
     cwd: &str,
 ) -> ResolvedAuth {
+    if is_bedrock_env(resolved.extra_env.as_ref()) {
+        return resolved;
+    }
     if auth_mode != "cli" {
         return resolved;
     }
@@ -2167,7 +2222,12 @@ async fn spawn_cli_process(
         // Pass API key to CLI when using API Key authentication mode (x-api-key header).
         // MUST remove AUTH_TOKEN to avoid inherited shell env vars taking priority.
         // Use env_remove (not empty string) — CLI may treat empty as "set but invalid".
-        if let Some(key) = api_key {
+        if is_bedrock_env(extra_env) {
+            // Bedrock must use the AWS credential chain and never inherited Anthropic auth.
+            cmd.env_remove("ANTHROPIC_API_KEY");
+            cmd.env_remove("ANTHROPIC_AUTH_TOKEN");
+            cmd.env_remove("ANTHROPIC_BASE_URL");
+        } else if let Some(key) = api_key {
             log::debug!("[session] setting ANTHROPIC_API_KEY env for local CLI");
             cmd.env("ANTHROPIC_API_KEY", key);
             cmd.env_remove("ANTHROPIC_AUTH_TOKEN");
@@ -2175,10 +2235,12 @@ async fn spawn_cli_process(
 
         // Pass auth token for third-party platforms using Bearer auth.
         // MUST remove API_KEY to avoid inherited shell env vars causing conflicts.
-        if let Some(token) = auth_token {
-            log::debug!("[session] setting ANTHROPIC_AUTH_TOKEN env for local CLI");
-            cmd.env("ANTHROPIC_AUTH_TOKEN", token);
-            cmd.env_remove("ANTHROPIC_API_KEY");
+        if !is_bedrock_env(extra_env) {
+            if let Some(token) = auth_token {
+                log::debug!("[session] setting ANTHROPIC_AUTH_TOKEN env for local CLI");
+                cmd.env("ANTHROPIC_AUTH_TOKEN", token);
+                cmd.env_remove("ANTHROPIC_API_KEY");
+            }
         }
 
         // Pass Base URL for third-party API endpoints
@@ -2197,7 +2259,7 @@ async fn spawn_cli_process(
         // Pass extra env vars for third-party platforms (e.g. API_TIMEOUT_MS for DeepSeek)
         if let Some(extra) = extra_env {
             for (k, v) in extra {
-                log::debug!("[session] setting extra env {}={}", k, v);
+                log::debug!("[session] setting extra env key={}", k);
                 cmd.env(k, v);
             }
         }
@@ -2345,13 +2407,19 @@ pub async fn side_question(
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
         // Auth env (mutually exclusive)
-        if let Some(key) = &resolved.api_key {
+        if is_bedrock_env(resolved.extra_env.as_ref()) {
+            local_cmd.env_remove("ANTHROPIC_API_KEY");
+            local_cmd.env_remove("ANTHROPIC_AUTH_TOKEN");
+            local_cmd.env_remove("ANTHROPIC_BASE_URL");
+        } else if let Some(key) = &resolved.api_key {
             local_cmd.env("ANTHROPIC_API_KEY", key);
             local_cmd.env_remove("ANTHROPIC_AUTH_TOKEN");
         }
-        if let Some(token) = &resolved.auth_token {
-            local_cmd.env("ANTHROPIC_AUTH_TOKEN", token);
-            local_cmd.env_remove("ANTHROPIC_API_KEY");
+        if !is_bedrock_env(resolved.extra_env.as_ref()) {
+            if let Some(token) = &resolved.auth_token {
+                local_cmd.env("ANTHROPIC_AUTH_TOKEN", token);
+                local_cmd.env_remove("ANTHROPIC_API_KEY");
+            }
         }
         if let Some(url) = &resolved.base_url {
             local_cmd.env("ANTHROPIC_BASE_URL", url);
@@ -3041,6 +3109,66 @@ mod tests {
         assert_eq!(
             resolved.models.as_deref(),
             Some(vec!["claude-sonnet-4-6".to_string()].as_slice())
+        );
+    }
+
+    #[test]
+    fn bedrock_profile_mode_uses_aws_env_without_anthropic_auth() {
+        let mut settings = default_user_settings();
+        let mut credential = make_cred("bedrock", None, None, Some("ANTHROPIC_API_KEY"));
+        credential.extra_env = Some(std::collections::HashMap::from([
+            ("CLAUDE_CODE_USE_BEDROCK".to_string(), "1".to_string()),
+            ("AWS_REGION".to_string(), "eu-west-1".to_string()),
+            ("AWS_PROFILE".to_string(), "development".to_string()),
+            (
+                "ANTHROPIC_BEDROCK_SERVICE_TIER".to_string(),
+                "flex".to_string(),
+            ),
+        ]));
+        settings.platform_credentials.push(credential);
+
+        let resolved = resolve_auth_env_for_platform(&None, &settings, Some("bedrock"));
+
+        assert!(resolved.api_key.is_none());
+        assert!(resolved.auth_token.is_none());
+        assert!(resolved.base_url.is_none());
+        let env = resolved.extra_env.expect("bedrock environment");
+        assert_eq!(env.get("AWS_REGION").map(String::as_str), Some("eu-west-1"));
+        assert_eq!(
+            env.get("AWS_PROFILE").map(String::as_str),
+            Some("development")
+        );
+        assert_eq!(
+            env.get("ANTHROPIC_BEDROCK_SERVICE_TIER")
+                .map(String::as_str),
+            Some("flex")
+        );
+        assert!(!env.contains_key("ANTHROPIC_API_KEY"));
+        assert!(!env.contains_key("ANTHROPIC_AUTH_TOKEN"));
+    }
+
+    #[test]
+    fn bedrock_api_key_uses_aws_bearer_token_env() {
+        let mut settings = default_user_settings();
+        settings.platform_credentials.push(make_cred(
+            "bedrock",
+            Some("bedrock-secret"),
+            None,
+            Some("ANTHROPIC_API_KEY"),
+        ));
+
+        let resolved = resolve_auth_env_for_platform(&None, &settings, Some("bedrock"));
+
+        assert!(resolved.api_key.is_none());
+        assert!(resolved.auth_token.is_none());
+        let env = resolved.extra_env.expect("bedrock environment");
+        assert_eq!(
+            env.get("AWS_BEARER_TOKEN_BEDROCK").map(String::as_str),
+            Some("bedrock-secret")
+        );
+        assert_eq!(
+            env.get("CLAUDE_CODE_USE_BEDROCK").map(String::as_str),
+            Some("1")
         );
     }
 

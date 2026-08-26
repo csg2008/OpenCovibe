@@ -451,13 +451,19 @@ pub async fn fork_oneshot(
         // Inject auth environment variables (mutually exclusive — remove the other to
         // prevent inherited shell env vars from interfering).
         // Use env_remove (not empty string) — CLI may treat empty as "set but invalid".
-        if let Some(key) = api_key {
+        if crate::commands::session::is_bedrock_env(extra_env) {
+            local_cmd.env_remove("ANTHROPIC_API_KEY");
+            local_cmd.env_remove("ANTHROPIC_AUTH_TOKEN");
+            local_cmd.env_remove("ANTHROPIC_BASE_URL");
+        } else if let Some(key) = api_key {
             local_cmd.env("ANTHROPIC_API_KEY", key);
             local_cmd.env_remove("ANTHROPIC_AUTH_TOKEN");
         }
-        if let Some(token) = auth_token {
-            local_cmd.env("ANTHROPIC_AUTH_TOKEN", token);
-            local_cmd.env_remove("ANTHROPIC_API_KEY");
+        if !crate::commands::session::is_bedrock_env(extra_env) {
+            if let Some(token) = auth_token {
+                local_cmd.env("ANTHROPIC_AUTH_TOKEN", token);
+                local_cmd.env_remove("ANTHROPIC_API_KEY");
+            }
         }
         if let Some(url) = base_url {
             local_cmd.env("ANTHROPIC_BASE_URL", url);

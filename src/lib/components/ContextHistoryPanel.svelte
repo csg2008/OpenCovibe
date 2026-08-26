@@ -107,6 +107,7 @@
   // TurnUsage.cost is cumulative (total_cost_usd), so delta = current - previous.
   let latestCostDelta = $derived.by(() => {
     if (turnUsages.length === 0) return 0;
+    if (!turnUsages[turnUsages.length - 1].costAvailable) return 0;
     if (turnUsages.length === 1) return turnUsages[0].cost;
     return turnUsages[turnUsages.length - 1].cost - turnUsages[turnUsages.length - 2].cost;
   });
@@ -224,7 +225,7 @@
               <span class="text-muted-foreground">{t("infoPanel_cost")}</span>
               <span class="flex items-center gap-1">
                 <span class="text-foreground/80 font-mono tabular-nums"
-                  >{formatCost(sessionInfo.cost)}</span
+                  >{sessionInfo.costAvailable ? formatCost(sessionInfo.cost) : "\u2014"}</span
                 >
                 {#if latestCostDelta > 0}
                   <span class="text-[10px] text-amber-500 font-mono tabular-nums"
@@ -366,7 +367,9 @@
               </div>
               {#if entry.tu}
                 <div class="flex items-center gap-2 mt-0.5 text-[10px] text-muted-foreground">
-                  <span>{formatCost(getTurnCost(entry.tu))}</span>
+                  <span
+                    >{entry.tu.costAvailable ? formatCost(getTurnCost(entry.tu)) : "\u2014"}</span
+                  >
                   <span>{formatTokenCount(entry.tu.inputTokens + entry.tu.outputTokens)} tok</span>
                   {#if entry.tu.durationMs}
                     <span>{formatDuration(entry.tu.durationMs)}</span>
@@ -394,7 +397,9 @@
                     <div class="flex items-center justify-between text-[10px]">
                       <span class="text-muted-foreground">{t("infoPanel_cost")}</span>
                       <span class="text-foreground/70 font-mono tabular-nums"
-                        >{formatCost(getTurnCost(entry.tu))}</span
+                        >{entry.tu.costAvailable
+                          ? formatCost(getTurnCost(entry.tu))
+                          : "\u2014"}</span
                       >
                     </div>
                     <div class="flex items-center justify-between text-[10px]">

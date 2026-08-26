@@ -14,6 +14,7 @@
     agent = "claude",
     model = "",
     cost = 0,
+    costAvailable = true,
     inputTokens = 0,
     outputTokens = 0,
     cacheReadTokens = 0,
@@ -66,6 +67,7 @@
     agent?: string;
     model?: string;
     cost?: number;
+    costAvailable?: boolean;
     inputTokens?: number;
     outputTokens?: number;
     cacheReadTokens?: number;
@@ -763,9 +765,9 @@
           </button>
         {/if}
 
-        {#if cost > 0}
+        {#if cost > 0 || (!costAvailable && contextTokens > 0)}
           <span class="text-foreground/30 shrink-0">&middot;</span>
-          <span class="shrink-0">{formatCost(cost)}</span>
+          <span class="shrink-0">{costAvailable ? formatCost(cost) : "\u2014"}</span>
         {/if}
 
         {#if contextTokens > 0}

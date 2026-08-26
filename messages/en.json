@@ -1,4 +1,5 @@
 {
+  "auth_awsCredentials": "AWS credentials",
   "settings_title": "Settings",
 
   "settings_tab_general": "General",
@@ -23,6 +24,17 @@
   "settings_general_show": "Show",
   "settings_general_hide": "Hide",
   "settings_general_apiKeyStored": "Stored locally in ~/.opencovibe/settings.json",
+  "settings_bedrock_apiKey": "Bedrock API Key (optional)",
+  "settings_bedrock_apiKeyHelp": "Leave empty to use the AWS default credential chain or the selected profile.",
+  "settings_bedrock_region": "AWS Region",
+  "settings_bedrock_profile": "AWS Profile (optional)",
+  "settings_bedrock_serviceTier": "Service Tier",
+  "settings_bedrock_credentialsHelp": "The AWS profile and default credential chain are resolved on the machine running Claude.",
+  "settings_bedrock_modelPlaceholder": "Inference profile ID or model ID",
+  "settings_bedrock_codexRequired": "A Bedrock API key and inference profile or model are required.",
+  "settings_bedrock_modelRegionHelp": "Model and inference-profile availability varies by AWS account and Region. Verify these IDs after changing Region.",
+  "settings_bedrock_managedEnvHelp": "Bedrock variables managed by the fields above are hidden here. Add only additional CLI environment variables.",
+  "settings_bedrock_codexAuthHelp": "Codex does not use the AWS profile or default credential chain here. A Bedrock API key is required and injected as AWS_BEARER_TOKEN_BEDROCK.",
   "settings_general_baseUrl": "Base URL",
   "settings_general_baseUrlHelp": "Leave empty for official Anthropic API. Set for proxies or OpenAI-compatible endpoints.",
   "settings_general_models": "Models",

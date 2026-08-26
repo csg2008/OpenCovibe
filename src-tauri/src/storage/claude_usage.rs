@@ -45,11 +45,16 @@ struct TokenCounts {
     output: u64,
     cache_read: u64,
     cache_create: u64,
+    /// Calculated per source record so time-based prices survive daily aggregation.
+    #[serde(default)]
+    cost_usd: f64,
+    #[serde(default)]
+    has_unpriced_usage: bool,
 }
 
 // ── Disk cache types ──
 
-const DISK_CACHE_VERSION: u32 = 1;
+const DISK_CACHE_VERSION: u32 = 4;
 
 #[derive(Serialize, Deserialize)]
 struct DiskCache {
@@ -96,6 +101,8 @@ struct LineUsage {
     cache_read_input_tokens: u64,
     #[serde(default)]
     cache_creation_input_tokens: u64,
+    #[serde(default)]
+    speed: Option<String>,
 }
 
 // ── stats-cache.json (activity data only) ──
@@ -434,12 +441,32 @@ fn scan_single_jsonl_standalone(path: &Path) -> FileData {
         }
         let date = &parsed.timestamp[..10];
 
+        let occurred_at = chrono::DateTime::parse_from_rfc3339(&parsed.timestamp).ok();
+        let pricing_context = pricing::PricingContext {
+            // Raw Claude JSONL does not retain the endpoint/provider. Only native Claude prices
+            // are safe to reconstruct; compatible-provider PAYG prices require app run metadata.
+            provider_id: Some("anthropic"),
+            occurred_at,
+            service_tier: usage.speed.as_deref(),
+            context_tokens: None,
+        };
+        let cost = pricing::try_estimate_cost_with_context(
+            &model,
+            usage.input_tokens,
+            usage.output_tokens,
+            usage.cache_read_input_tokens,
+            usage.cache_creation_input_tokens,
+            &pricing_context,
+        );
+
         let day_entry = daily_tokens.entry(date.to_string()).or_default();
         let tc = day_entry.entry(model).or_default();
         tc.input += usage.input_tokens;
         tc.output += usage.output_tokens;
         tc.cache_read += usage.cache_read_input_tokens;
         tc.cache_create += usage.cache_creation_input_tokens;
+        tc.has_unpriced_usage |= cost.is_none();
+        tc.cost_usd += cost.unwrap_or(0.0);
     }
 
     FileData {
@@ -466,6 +493,8 @@ fn merge_all_file_data(per_file: &HashMap<String, FileData>) -> (DailyModelMap, 
                 entry.output += tc.output;
                 entry.cache_read += tc.cache_read;
                 entry.cache_create += tc.cache_create;
+                entry.cost_usd += tc.cost_usd;
+                entry.has_unpriced_usage |= tc.has_unpriced_usage;
             }
         }
 
@@ -539,6 +568,7 @@ fn build_overview(data: &CachedData, days: Option<u32>) -> UsageOverview {
         let mut day_input = 0u64;
         let mut day_output = 0u64;
         let mut day_cost = 0.0f64;
+        let mut day_cost_complete = true;
 
         if let Some(models) = models {
             for (model, tc) in models {
@@ -547,16 +577,13 @@ fn build_overview(data: &CachedData, days: Option<u32>) -> UsageOverview {
                 entry.output += tc.output;
                 entry.cache_read += tc.cache_read;
                 entry.cache_create += tc.cache_create;
+                entry.cost_usd += tc.cost_usd;
+                entry.has_unpriced_usage |= tc.has_unpriced_usage;
 
                 day_input += tc.input;
                 day_output += tc.output;
-                day_cost += pricing::estimate_cost(
-                    model,
-                    tc.input,
-                    tc.output,
-                    tc.cache_read,
-                    tc.cache_create,
-                );
+                day_cost += tc.cost_usd;
+                day_cost_complete &= !tc.has_unpriced_usage;
             }
         }
 
@@ -575,6 +602,7 @@ fn build_overview(data: &CachedData, days: Option<u32>) -> UsageOverview {
         daily_aggs.push(DailyAggregate {
             date: date.to_string(),
             cost_usd: day_cost,
+            cost_complete: day_cost_complete,
             runs: sess_count,
             input_tokens: day_input,
             output_tokens: day_output,
@@ -618,8 +646,7 @@ fn build_overview(data: &CachedData, days: Option<u32>) -> UsageOverview {
     let mut by_model: Vec<ModelAggregate> = Vec::new();
 
     for (model, tc) in &model_totals {
-        let cost =
-            pricing::estimate_cost(model, tc.input, tc.output, tc.cache_read, tc.cache_create);
+        let cost = tc.cost_usd;
         total_cost += cost;
         total_tokens += tc.input + tc.output;
 
@@ -631,6 +658,7 @@ fn build_overview(data: &CachedData, days: Option<u32>) -> UsageOverview {
             cache_read_tokens: tc.cache_read,
             cache_write_tokens: tc.cache_create,
             cost_usd: cost,
+            cost_complete: !tc.has_unpriced_usage,
             pct: 0.0,
         });
     }
@@ -676,6 +704,9 @@ fn build_overview(data: &CachedData, days: Option<u32>) -> UsageOverview {
 
     UsageOverview {
         total_cost_usd: total_cost,
+        cost_complete: model_totals
+            .values()
+            .all(|tokens| !tokens.has_unpriced_usage),
         total_tokens,
         total_runs: total_sessions,
         avg_cost_per_run: avg_cost,
@@ -836,11 +867,13 @@ pub fn clear_cache() {
 mod tests {
     use super::*;
     use crate::models::DailyAggregate;
+    use std::io::Write;
 
     fn make_day(date: &str, input: u64, output: u64, runs: u32) -> DailyAggregate {
         DailyAggregate {
             date: date.to_string(),
             cost_usd: 0.0,
+            cost_complete: true,
             runs,
             input_tokens: input,
             output_tokens: output,
@@ -918,6 +951,98 @@ mod tests {
     }
 
     #[test]
+    fn scan_does_not_guess_third_party_price_without_provider_identity() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        for timestamp in ["2026-08-25T08:00:00+08:00", "2026-08-25T09:00:00+08:00"] {
+            writeln!(
+                file,
+                "{}",
+                serde_json::json!({
+                    "timestamp": timestamp,
+                    "message": {
+                        "role": "assistant",
+                        "model": "deepseek-v4-flash",
+                        "usage": {
+                            "input_tokens": 1_000_000,
+                            "output_tokens": 0,
+                            "cache_read_input_tokens": 0,
+                            "cache_creation_input_tokens": 0
+                        }
+                    }
+                })
+            )
+            .unwrap();
+        }
+
+        let scanned = scan_single_jsonl_standalone(file.path());
+        let counts = &scanned.daily_tokens["2026-08-25"]["deepseek-v4-flash"];
+        assert_eq!(counts.input, 2_000_000);
+        assert_eq!(counts.cost_usd, 0.0);
+        assert!(counts.has_unpriced_usage);
+
+        let overview = build_overview(
+            &CachedData {
+                computed_at: Instant::now(),
+                daily_model: scanned.daily_tokens.into_iter().collect(),
+                daily_activity: HashMap::new(),
+                scan_activity: HashMap::new(),
+                total_sessions: 0,
+            },
+            None,
+        );
+        assert_eq!(overview.total_cost_usd, 0.0);
+        assert!(!overview.cost_complete);
+        assert!(!overview.daily[0].cost_complete);
+        assert!(!overview.by_model[0].cost_complete);
+    }
+
+    #[test]
+    fn scan_applies_claude_fast_tier_and_marks_unknown_prices_incomplete() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        for (model, speed) in [("claude-opus-5", Some("fast")), ("future-model", None)] {
+            writeln!(
+                file,
+                "{}",
+                serde_json::json!({
+                    "timestamp": "2026-08-25T09:00:00Z",
+                    "message": {
+                        "role": "assistant",
+                        "model": model,
+                        "usage": {
+                            "input_tokens": 1_000_000,
+                            "output_tokens": 0,
+                            "cache_read_input_tokens": 0,
+                            "cache_creation_input_tokens": 0,
+                            "speed": speed
+                        }
+                    }
+                })
+            )
+            .unwrap();
+        }
+
+        let scanned = scan_single_jsonl_standalone(file.path());
+        assert_eq!(
+            scanned.daily_tokens["2026-08-25"]["claude-opus-5"].cost_usd,
+            10.0
+        );
+        assert!(scanned.daily_tokens["2026-08-25"]["future-model"].has_unpriced_usage);
+
+        let overview = build_overview(
+            &CachedData {
+                computed_at: Instant::now(),
+                daily_model: scanned.daily_tokens.into_iter().collect(),
+                daily_activity: HashMap::new(),
+                scan_activity: HashMap::new(),
+                total_sessions: 0,
+            },
+            None,
+        );
+        assert!(!overview.cost_complete);
+        assert!(!overview.daily[0].cost_complete);
+    }
+
+    #[test]
     fn test_model_breakdown_last_30_only() {
         // Build 50 days of data in a CachedData-like structure
         // This test verifies the build_overview logic indirectly
@@ -927,6 +1052,7 @@ mod tests {
             daily.push(DailyAggregate {
                 date,
                 cost_usd: 1.0,
+                cost_complete: true,
                 runs: 1,
                 input_tokens: 100,
                 output_tokens: 50,

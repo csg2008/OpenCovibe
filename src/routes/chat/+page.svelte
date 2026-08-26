@@ -34,7 +34,11 @@
     SessionInfoData,
     TimelineEntry,
   } from "$lib/types";
-  import { PLATFORM_PRESETS, findCredential } from "$lib/utils/platform-presets";
+  import {
+    PLATFORM_PRESETS,
+    defaultPlatformModel,
+    findCredential,
+  } from "$lib/utils/platform-presets";
   import { isKnownAgent, getAgentFeatures } from "$lib/utils/agent-features";
   import {
     detectBatchGroups,
@@ -652,6 +656,7 @@
       permissionMode: store.permissionMode,
       fastModeState: store.fastModeState,
       cost: store.usage.cost,
+      costAvailable: store.usage.costAvailable,
       inputTokens: cumulativeTokens.input,
       outputTokens: cumulativeTokens.output,
       cacheReadTokens: cumulativeTokens.cacheRead,
@@ -726,10 +731,11 @@
     const preset = PLATFORM_PRESETS.find((p) => p.id === pid);
     const models = cred?.models?.length ? cred.models : preset?.models;
     if (!models?.length) return [];
-    return models.map((m, i) => ({
+    const defaultModel = defaultPlatformModel(models);
+    return models.map((m) => ({
       value: m,
       displayName: m,
-      description: i === 0 ? "Default" : "",
+      description: m === defaultModel ? "Default" : "",
     }));
   });
 
@@ -1371,8 +1377,9 @@
         );
         const initPreset = PLATFORM_PRESETS.find((p) => p.id === store.platformId);
         const initModels = initCred?.models?.length ? initCred.models : initPreset?.models;
-        if (store.platformId !== "anthropic" && initModels?.[0]) {
-          store.model = initModels[0];
+        const defaultModel = defaultPlatformModel(initModels);
+        if (store.platformId !== "anthropic" && defaultModel) {
+          store.model = defaultModel;
         } else if (store.platformId === "anthropic" && settings.default_model) {
           // default_model is global — only valid for Anthropic native platform.
           // Third-party platforms without a models list leave model unset.
@@ -2834,7 +2841,7 @@
       const preset = PLATFORM_PRESETS.find((p) => p.id === platformId);
       const models = cred?.models?.length ? cred.models : preset?.models;
       if (models?.length) {
-        const defaultModel = models[0];
+        const defaultModel = defaultPlatformModel(models);
         dbg("chat", "auto-switch model for platform", { platformId, model: defaultModel });
         store.model = defaultModel;
       } else if (platformId === "anthropic") {
@@ -4540,6 +4547,7 @@
           ""
         : store.model}
       cost={store.usage.cost}
+      costAvailable={store.usage.costAvailable}
       inputTokens={cumulativeTokens.input}
       outputTokens={cumulativeTokens.output}
       cacheReadTokens={cumulativeTokens.cacheRead}

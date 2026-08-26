@@ -5,7 +5,7 @@ import { dbg } from "./debug";
 export interface AgentFormData {
   name: string;
   description: string;
-  model: string; // "inherit" | "sonnet" | "opus" | "haiku"
+  model: string; // Claude model alias, or "inherit"
   tools: string[];
   disallowedTools: string[];
   permissionMode: string; // "default" | "acceptEdits" | "dontAsk" | "bypassPermissions" | "plan"
@@ -33,7 +33,7 @@ const BUILTIN_AGENT_NAMES = [
   "statusline-setup",
 ];
 
-const VALID_MODELS = ["inherit", "sonnet", "opus", "haiku"];
+const VALID_MODELS = ["inherit", "best", "fable", "sonnet", "opus", "haiku"];
 const VALID_PERMISSION_MODES = ["default", "acceptEdits", "dontAsk", "bypassPermissions", "plan"];
 
 const NAME_REGEX = /^[a-z0-9][a-z0-9-]{0,63}$/;

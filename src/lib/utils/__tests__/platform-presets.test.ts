@@ -1,5 +1,99 @@
 import { describe, it, expect } from "vitest";
-import { expandModelsToTiers, compressModelsFromTiers } from "../platform-presets";
+import {
+  PLATFORM_PRESETS,
+  buildOnboardingPlatformPatch,
+  defaultPlatformModel,
+  expandModelsToTiers,
+  compressModelsFromTiers,
+  globalClaudeAuthPatch,
+  platformHasConfiguredAuth,
+} from "../platform-presets";
+
+describe("Bedrock platform preset", () => {
+  it("uses the AWS credential chain defaults mirrored by the backend", () => {
+    const preset = PLATFORM_PRESETS.find((candidate) => candidate.id === "bedrock");
+
+    expect(preset).toMatchObject({
+      base_url: "",
+      models: [
+        "us.anthropic.claude-opus-4-8",
+        "us.anthropic.claude-sonnet-4-6",
+        "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+      ],
+      extra_env: {
+        CLAUDE_CODE_USE_BEDROCK: "1",
+        AWS_REGION: "us-east-1",
+      },
+    });
+  });
+});
+
+describe("provider runtime helpers", () => {
+  it("uses the Sonnet tier as the default for three-model providers", () => {
+    expect(defaultPlatformModel(["opus", "sonnet", "haiku"])).toBe("sonnet");
+    expect(defaultPlatformModel(["main", "haiku"])).toBe("main");
+  });
+
+  it("treats Bedrock as configured without a stored API key", () => {
+    expect(platformHasConfiguredAuth([], "bedrock")).toBe(true);
+    expect(platformHasConfiguredAuth([], "deepseek")).toBe(false);
+  });
+
+  it("does not copy Bedrock credentials into global Anthropic fields", () => {
+    expect(globalClaudeAuthPatch("bedrock", "aws-key", "https://stale.example")).toEqual({
+      anthropic_api_key: null,
+      anthropic_base_url: null,
+    });
+    expect(globalClaudeAuthPatch("anthropic", "sk-ant", "")).toEqual({
+      anthropic_api_key: "sk-ant",
+      anthropic_base_url: null,
+    });
+  });
+
+  it("persists a third-party provider identity and replaces only its credential", () => {
+    const preset = PLATFORM_PRESETS.find((candidate) => candidate.id === "deepseek")!;
+    const patch = buildOnboardingPlatformPatch(
+      [
+        { platform_id: "kimi", api_key: "kimi-key" },
+        {
+          platform_id: "deepseek",
+          models: ["private-deployment"],
+          extra_env: { API_TIMEOUT_MS: "1234", PRIVATE_FLAG: "1" },
+        },
+      ],
+      preset,
+      " deepseek-key ",
+      preset.base_url,
+    );
+
+    expect(patch.active_platform_id).toBe("deepseek");
+    expect(patch.platform_credentials).toEqual([
+      { platform_id: "kimi", api_key: "kimi-key" },
+      {
+        platform_id: "deepseek",
+        api_key: "deepseek-key",
+        base_url: "https://api.deepseek.com/anthropic",
+        auth_env_var: "ANTHROPIC_AUTH_TOKEN",
+        models: ["private-deployment"],
+        extra_env: { API_TIMEOUT_MS: "1234", PRIVATE_FLAG: "1" },
+      },
+    ]);
+  });
+
+  it("persists keyless local providers so runtime defaults can supply placeholder auth", () => {
+    const preset = PLATFORM_PRESETS.find((candidate) => candidate.id === "ollama")!;
+    const patch = buildOnboardingPlatformPatch([], preset, "", preset.base_url);
+
+    expect(patch.active_platform_id).toBe("ollama");
+    expect(patch.platform_credentials).toEqual([
+      expect.objectContaining({
+        platform_id: "ollama",
+        api_key: undefined,
+        base_url: "http://localhost:11434",
+      }),
+    ]);
+  });
+});
 
 describe("expandModelsToTiers", () => {
   it("undefined → all empty", () => {

@@ -14,6 +14,27 @@ export const PLATFORM_PRESETS: PlatformPreset[] = [
     category: "provider",
   },
   {
+    id: "bedrock",
+    name: "Amazon Bedrock",
+    base_url: "",
+    // The stored API key is injected as AWS_BEARER_TOKEN_BEDROCK by the backend. Keeping this
+    // field on the existing union avoids creating a second credential authority for AWS.
+    auth_env_var: "ANTHROPIC_API_KEY",
+    description: "Claude through AWS Bedrock",
+    key_placeholder: "optional Bedrock API key",
+    category: "provider",
+    models: [
+      "us.anthropic.claude-opus-4-8",
+      "us.anthropic.claude-sonnet-4-6",
+      "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+    ],
+    extra_env: {
+      CLAUDE_CODE_USE_BEDROCK: "1",
+      AWS_REGION: "us-east-1",
+    },
+    docs_url: "https://code.claude.com/docs/en/amazon-bedrock",
+  },
+  {
     id: "deepseek",
     name: "DeepSeek",
     base_url: "https://api.deepseek.com/anthropic",
@@ -28,12 +49,12 @@ export const PLATFORM_PRESETS: PlatformPreset[] = [
   {
     id: "kimi",
     name: "Kimi (Moonshot)",
-    base_url: "https://api.moonshot.cn/anthropic",
+    base_url: "https://api.moonshot.ai/anthropic",
     auth_env_var: "ANTHROPIC_AUTH_TOKEN",
     description: "Moonshot AI",
     key_placeholder: "your-kimi-key",
     category: "provider",
-    models: ["kimi-k2.5"],
+    models: ["kimi-k3[1m]", "kimi-k2.7-code", "kimi-k2.7-code-highspeed"],
     docs_url: "https://platform.moonshot.ai/docs/guide/agent-support",
   },
   {
@@ -54,7 +75,7 @@ export const PLATFORM_PRESETS: PlatformPreset[] = [
     description: "Zhipu AI — bigmodel.cn",
     key_placeholder: "your-zhipu-key",
     category: "provider",
-    models: ["glm-5.1", "glm-5-turbo", "glm-4.5-air"],
+    models: ["glm-5.3[1m]", "glm-4.7"],
     extra_env: { API_TIMEOUT_MS: "3000000" },
     docs_url: "https://docs.bigmodel.cn/cn/guide/develop/claude/introduction",
   },
@@ -66,7 +87,7 @@ export const PLATFORM_PRESETS: PlatformPreset[] = [
     description: "Zhipu AI — z.ai",
     key_placeholder: "your-zhipu-key",
     category: "provider",
-    models: ["glm-5.1", "glm-5-turbo", "glm-4.5-air"],
+    models: ["glm-5.3[1m]", "glm-4.7"],
     extra_env: { API_TIMEOUT_MS: "3000000" },
     docs_url: "https://docs.z.ai/devpack/tool/claude",
   },
@@ -78,7 +99,7 @@ export const PLATFORM_PRESETS: PlatformPreset[] = [
     description: "Alibaba subscription plan",
     key_placeholder: "sk-sp-xxxxx",
     category: "provider",
-    models: ["qwen3.5-plus", "qwen3-coder-next"],
+    models: ["qwen3.7-plus", "qwen3-coder-next"],
     docs_url: "https://help.aliyun.com/zh/model-studio/coding-plan",
   },
   {
@@ -89,7 +110,7 @@ export const PLATFORM_PRESETS: PlatformPreset[] = [
     description: "Alibaba pay-as-you-go",
     key_placeholder: "sk-xxxxx",
     category: "provider",
-    models: ["qwen3.5-plus", "qwen3-coder-next"],
+    models: ["qwen3.8-max", "qwen3.7-plus", "qwen3-coder-next"],
     docs_url: "https://help.aliyun.com/zh/model-studio/anthropic-api-messages",
   },
   {
@@ -189,7 +210,7 @@ export const PLATFORM_PRESETS: PlatformPreset[] = [
     description: "Meituan LongCat",
     key_placeholder: "your-longcat-key",
     category: "provider",
-    models: ["LongCat-2.0-Preview"],
+    models: ["LongCat-2.0"],
     docs_url: "https://longcat.chat/platform/docs/ClaudeCode.html",
   },
   {
@@ -388,6 +409,77 @@ export function expandModelsToTiers(models?: string[]): [string, string, string]
   if (models.length === 1) return [models[0], models[0], models[0]];
   if (models.length === 2) return [models[0], models[0], models[1]];
   return [models[0], models[1], models[2]];
+}
+
+/** Resolve the provider's primary model using the same tier semantics as the backend. */
+export function defaultPlatformModel(models?: string[]): string {
+  return expandModelsToTiers(models)[1];
+}
+
+/** Bedrock can authenticate through the AWS credential chain without a stored API key. */
+export function platformHasConfiguredAuth(
+  credentials: import("$lib/types").PlatformCredential[],
+  platformId: string,
+): boolean {
+  return platformId === "bedrock" || !!findCredential(credentials, platformId)?.api_key;
+}
+
+/** Keep Bedrock bearer credentials out of the legacy global Anthropic fields. */
+export function globalClaudeAuthPatch(
+  platformId: string,
+  apiKey: string,
+  baseUrl: string,
+): { anthropic_api_key: string | null; anthropic_base_url: string | null } {
+  if (platformId === "bedrock") {
+    return { anthropic_api_key: null, anthropic_base_url: null };
+  }
+  return {
+    anthropic_api_key: apiKey || null,
+    anthropic_base_url: baseUrl || null,
+  };
+}
+
+/** Build the provider identity persisted by onboarding before the first chat starts. */
+export function buildOnboardingPlatformPatch(
+  credentials: import("$lib/types").PlatformCredential[],
+  preset: PlatformPreset,
+  apiKey: string,
+  baseUrl: string,
+  options: {
+    platformId?: string;
+    extraEnv?: Record<string, string>;
+  } = {},
+): {
+  active_platform_id: string;
+  platform_credentials: import("$lib/types").PlatformCredential[];
+} {
+  const platformId = options.platformId ?? preset.id;
+  if (platformId === "anthropic") {
+    return {
+      active_platform_id: platformId,
+      platform_credentials: credentials,
+    };
+  }
+
+  const existing = credentials.find((credential) => credential.platform_id === platformId);
+  const credential: import("$lib/types").PlatformCredential = {
+    ...existing,
+    platform_id: platformId,
+    api_key: apiKey.trim() || undefined,
+    base_url: baseUrl.trim() || undefined,
+    auth_env_var: preset.auth_env_var,
+    name: preset.id === "custom" ? preset.name : existing?.name,
+    models: existing?.models ?? preset.models,
+    extra_env: options.extraEnv ?? existing?.extra_env ?? preset.extra_env,
+  };
+
+  return {
+    active_platform_id: platformId,
+    platform_credentials: [
+      ...credentials.filter((existing) => existing.platform_id !== platformId),
+      credential,
+    ],
+  };
 }
 
 /**

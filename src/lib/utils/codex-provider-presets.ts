@@ -6,10 +6,12 @@
 // so they are intentionally NOT listed here. Verified-working set: Responses-capable gateways +
 // Ollama (local) + Custom. See memory codex-integration-audit-2026-06 / the provider research.
 //
-// Default `model` strings verified against each gateway's own Codex docs (2026-06): Vercel and
-// Requesty document gpt-5.5; AiHubMix documents gpt-5.2 (5.5 not yet listed there); ZenMux uses
-// gpt-5.2-codex. Pin to what each gateway actually publishes, not the absolute newest OpenAI model
-// — a model the gateway hasn't onboarded yet would fail out of the box.
+// Default `model` strings verified against each gateway's own Codex docs (2026-08): Vercel
+// documents GPT-5.6 Sol; OpenRouter documents its `~openai/gpt-latest` alias; Requesty documents
+// GPT-5.5; AiHubMix documents GPT-5.2; ZenMux's safe default remains GPT-5.2 Codex because its
+// GPT-5.6 route requires extra multi-agent config. Portkey has no default because its model IDs
+// include a user-created provider slug. Pin to what each gateway actually publishes as a working
+// default, not the absolute newest model — a model the gateway hasn't onboarded yet would fail.
 //
 // At spawn we inject these as `codex exec -c model_providers.<id>.{base_url,env_key,wire_api,
 // requires_openai_auth=false}` plus the API key via the env var named by `env_key`.
@@ -32,16 +34,59 @@ export interface CodexProviderPreset {
   docs_url?: string;
 }
 
+const BEDROCK_RUNTIME_URL =
+  /^https:\/\/bedrock-runtime\.([a-z0-9-]+)\.amazonaws\.com\/openai\/v1\/?$/;
+
+export function bedrockRuntimeBaseUrl(region: string): string {
+  return `https://bedrock-runtime.${region.trim()}.amazonaws.com/openai/v1`;
+}
+
+export function bedrockRegionFromBaseUrl(baseUrl: string): string | null {
+  return BEDROCK_RUNTIME_URL.exec(baseUrl.trim())?.[1] ?? null;
+}
+
 export const CODEX_PROVIDER_PRESETS: CodexProviderPreset[] = [
+  {
+    id: "bedrock",
+    name: "Amazon Bedrock",
+    description: "AWS Responses API",
+    base_url: bedrockRuntimeBaseUrl("us-east-1"),
+    env_key: "AWS_BEARER_TOKEN_BEDROCK",
+    // Bedrock model and inference-profile availability is account and region specific.
+    model: "",
+    key_placeholder: "your-bedrock-api-key",
+    docs_url: "https://docs.aws.amazon.com/bedrock/latest/userguide/bedrock-mantle.html",
+  },
   {
     id: "vercel",
     name: "Vercel AI Gateway",
     description: "Responses API gateway",
     base_url: "https://ai-gateway.vercel.sh/v1",
     env_key: "AI_GATEWAY_API_KEY",
-    model: "openai/gpt-5.5",
+    model: "openai/gpt-5.6-sol",
     key_placeholder: "vck_…",
     docs_url: "https://vercel.com/docs/ai-gateway/codex",
+  },
+  {
+    id: "openrouter",
+    name: "OpenRouter",
+    description: "Multi-provider router (Responses)",
+    base_url: "https://openrouter.ai/api/v1",
+    env_key: "OPENROUTER_API_KEY",
+    model: "~openai/gpt-latest",
+    key_placeholder: "sk-or-…",
+    docs_url: "https://openrouter.ai/docs/cookbook/coding-agents/codex-cli",
+  },
+  {
+    id: "portkey",
+    name: "Portkey",
+    description: "AI gateway (Responses)",
+    base_url: "https://api.portkey.ai/v1",
+    env_key: "PORTKEY_API_KEY",
+    // Portkey model IDs include a user-created provider slug, so there is no universal default.
+    model: "",
+    key_placeholder: "your-portkey-api-key",
+    docs_url: "https://docs.portkey.ai/docs/integrations/libraries/codex",
   },
   {
     id: "aihubmix",

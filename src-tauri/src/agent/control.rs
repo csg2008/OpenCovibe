@@ -279,35 +279,39 @@ fn read_claude_settings_model() -> Option<String> {
 
 /// Fallback model list when CLI is unavailable.
 pub fn fallback_cli_info() -> CliInfo {
+    let adaptive = |value: &str, name: &str, description: &str| CliModelInfo {
+        value: value.to_string(),
+        display_name: name.to_string(),
+        description: description.to_string(),
+        supports_effort: Some(true),
+        supported_effort_levels: Some(vec![
+            "low".into(),
+            "medium".into(),
+            "high".into(),
+            "xhigh".into(),
+            "max".into(),
+        ]),
+        supports_adaptive_thinking: Some(true),
+    };
     CliInfo {
         models: vec![
-            CliModelInfo {
-                value: "default".to_string(),
-                display_name: "Default (recommended)".to_string(),
-                description: "Sonnet 4.5".to_string(),
-                supports_effort: Some(true),
-                supported_effort_levels: Some(vec![
-                    "low".into(),
-                    "medium".into(),
-                    "high".into(),
-                    "max".into(),
-                ]),
-                supports_adaptive_thinking: Some(true),
-            },
-            CliModelInfo {
-                value: "opus".to_string(),
-                display_name: "Opus".to_string(),
-                description: "Opus 4.8".to_string(),
-                supports_effort: Some(true),
-                supported_effort_levels: Some(vec![
-                    "low".into(),
-                    "medium".into(),
-                    "high".into(),
-                    "xhigh".into(),
-                    "max".into(),
-                ]),
-                supports_adaptive_thinking: Some(true),
-            },
+            adaptive(
+                "default",
+                "Default (recommended)",
+                "Account runtime default",
+            ),
+            adaptive(
+                "best",
+                "Best",
+                "Fable 5 when available, otherwise latest Opus",
+            ),
+            adaptive("fable", "Fable", "Fable 5 for long-running, complex tasks"),
+            adaptive("opus", "Opus", "Latest Opus (Opus 5 on Anthropic API)"),
+            adaptive(
+                "sonnet",
+                "Sonnet",
+                "Latest Sonnet (Sonnet 5 on Anthropic API)",
+            ),
             CliModelInfo {
                 value: "haiku".to_string(),
                 display_name: "Haiku".to_string(),

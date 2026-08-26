@@ -4,12 +4,18 @@
     checkAuthStatus,
     checkCodexAuth,
     detectInstallMethods,
+    getUserSettings,
     runClaudeLogin,
     runCodexLogin,
     updateUserSettings,
   } from "$lib/api";
   import type { InstallMethod, PlatformPreset } from "$lib/types";
-  import { PLATFORM_PRESETS, PRESET_CATEGORIES } from "$lib/utils/platform-presets";
+  import {
+    buildOnboardingPlatformPatch,
+    globalClaudeAuthPatch,
+    PLATFORM_PRESETS,
+    PRESET_CATEGORIES,
+  } from "$lib/utils/platform-presets";
   import { dbg, dbgWarn } from "$lib/utils/debug";
   import { IS_WINDOWS } from "$lib/utils/platform";
   import { getTransport } from "$lib/transport";
@@ -49,6 +55,9 @@
   let customBaseUrl = $state("");
   let showKey = $state(false);
   let saving = $state(false);
+  let bedrockRegion = $state("us-east-1");
+  let bedrockProfile = $state("");
+  let bedrockServiceTier = $state<"default" | "flex" | "priority">("default");
 
   // Done state
   let doneTimer = $state<ReturnType<typeof setTimeout> | null>(null);
@@ -190,6 +199,9 @@
     selectedPlatform = preset;
     apiKey = "";
     customBaseUrl = preset.base_url;
+    bedrockRegion = preset.extra_env?.AWS_REGION ?? "us-east-1";
+    bedrockProfile = "";
+    bedrockServiceTier = "default";
     showKey = false;
   }
 
@@ -202,13 +214,35 @@
       const effectiveBaseUrl =
         selectedPlatform.id === "custom" ? customBaseUrl : selectedPlatform.base_url;
 
+      const settings = await getUserSettings();
+      let extraEnv: Record<string, string> | undefined;
+      if (selectedPlatform.id === "bedrock") {
+        extraEnv = {
+          CLAUDE_CODE_USE_BEDROCK: "1",
+          AWS_REGION: bedrockRegion.trim() || "us-east-1",
+        };
+        if (bedrockProfile.trim()) extraEnv.AWS_PROFILE = bedrockProfile.trim();
+        if (bedrockServiceTier !== "default") {
+          extraEnv.ANTHROPIC_BEDROCK_SERVICE_TIER = bedrockServiceTier;
+        }
+      }
+      const platformId =
+        selectedPlatform.id === "custom" ? `custom-${Date.now()}` : selectedPlatform.id;
+      const platformPatch = buildOnboardingPlatformPatch(
+        settings.platform_credentials ?? [],
+        selectedPlatform,
+        apiKey,
+        effectiveBaseUrl,
+        { platformId, extraEnv },
+      );
+
       await updateUserSettings({
         auth_mode: "api",
-        anthropic_api_key: apiKey || undefined,
-        anthropic_base_url: effectiveBaseUrl || undefined,
+        ...globalClaudeAuthPatch(selectedPlatform.id, apiKey, effectiveBaseUrl),
         auth_env_var: selectedPlatform.auth_env_var,
         onboarding_completed: true,
-      });
+        ...platformPatch,
+      } as Partial<import("$lib/types").UserSettings>);
 
       dbg("wizard", "api key saved", {
         platform: selectedPlatform.id,
@@ -572,7 +606,9 @@
             <!-- API Key input -->
             <div class="flex flex-col gap-1.5">
               <label class="text-xs font-medium text-muted-foreground"
-                >{t("setup_apiKeyLabel")}</label
+                >{selectedPlatform.id === "bedrock"
+                  ? t("settings_bedrock_apiKey")
+                  : t("setup_apiKeyLabel")}</label
               >
               <div class="relative">
                 <input
@@ -590,14 +626,61 @@
               </div>
               {#if selectedPlatform.id === "ollama"}
                 <p class="text-xs text-muted-foreground">{t("setup_noKeyNeeded")}</p>
+              {:else if selectedPlatform.id === "bedrock"}
+                <p class="text-xs text-muted-foreground">{t("settings_bedrock_apiKeyHelp")}</p>
               {/if}
             </div>
 
+            {#if selectedPlatform.id === "bedrock"}
+              <div class="grid grid-cols-2 gap-3">
+                <div class="flex flex-col gap-1.5">
+                  <label
+                    class="text-xs font-medium text-muted-foreground"
+                    for="wizard-bedrock-region">{t("settings_bedrock_region")}</label
+                  >
+                  <input
+                    id="wizard-bedrock-region"
+                    bind:value={bedrockRegion}
+                    placeholder="us-east-1"
+                    class="w-full rounded-md border border-border bg-background px-3 py-2 text-sm font-mono focus:outline-none focus:border-ring"
+                  />
+                </div>
+                <div class="flex flex-col gap-1.5">
+                  <label
+                    class="text-xs font-medium text-muted-foreground"
+                    for="wizard-bedrock-profile">{t("settings_bedrock_profile")}</label
+                  >
+                  <input
+                    id="wizard-bedrock-profile"
+                    bind:value={bedrockProfile}
+                    placeholder="default"
+                    class="w-full rounded-md border border-border bg-background px-3 py-2 text-sm font-mono focus:outline-none focus:border-ring"
+                  />
+                </div>
+              </div>
+              <div class="flex flex-col gap-1.5">
+                <label class="text-xs font-medium text-muted-foreground" for="wizard-bedrock-tier"
+                  >{t("settings_bedrock_serviceTier")}</label
+                >
+                <select
+                  id="wizard-bedrock-tier"
+                  bind:value={bedrockServiceTier}
+                  class="w-full rounded-md border border-border bg-background px-3 py-2 text-sm focus:outline-none focus:border-ring"
+                >
+                  <option value="default">default</option>
+                  <option value="flex">flex</option>
+                  <option value="priority">priority</option>
+                </select>
+              </div>
+            {/if}
+
             <!-- Auth type info -->
             <p class="text-xs text-muted-foreground">
-              {selectedPlatform.auth_env_var === "ANTHROPIC_API_KEY"
-                ? t("setup_authTypeApiKey")
-                : t("setup_authTypeBearer")}
+              {selectedPlatform.id === "bedrock"
+                ? t("settings_bedrock_credentialsHelp")
+                : selectedPlatform.auth_env_var === "ANTHROPIC_API_KEY"
+                  ? t("setup_authTypeApiKey")
+                  : t("setup_authTypeBearer")}
             </p>
 
             {#if error}
@@ -608,7 +691,8 @@
 
             <button
               class="rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-50"
-              disabled={saving || (selectedPlatform.id !== "ollama" && !apiKey)}
+              disabled={saving ||
+                (selectedPlatform.id !== "ollama" && selectedPlatform.id !== "bedrock" && !apiKey)}
               onclick={saveApiKey}
             >
               {#if saving}

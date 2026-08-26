@@ -4,7 +4,7 @@
   import { t } from "$lib/i18n/index.svelte";
   import {
     buildPlatformList,
-    findCredential,
+    platformHasConfiguredAuth,
     PRESET_CATEGORIES,
   } from "$lib/utils/platform-presets";
   import { dbg } from "$lib/utils/debug";
@@ -95,7 +95,8 @@
       if (ps?.running && ps.needsAuth) return "bg-amber-500";
       return "bg-muted-foreground/30";
     }
-    const hasCred = !!findCredential(platformCredentials, platformId)?.api_key;
+    if (platformId === "bedrock") return "bg-blue-500";
+    const hasCred = platformHasConfiguredAuth(platformCredentials, platformId);
     return hasCred ? "bg-emerald-500" : "bg-amber-500";
   });
 
@@ -296,7 +297,13 @@
                     </span>
                   {/if}
                 </p>
-                {#if authOverview.app_has_credentials}
+                {#if platformId === "bedrock"}
+                  <p class="text-[10px] text-blue-500">
+                    <span class="inline-block h-1 w-1 rounded-full bg-blue-500 mr-0.5 align-middle"
+                    ></span>
+                    {t("auth_awsCredentials")}
+                  </p>
+                {:else if authOverview.app_has_credentials}
                   <p class="text-[10px] text-emerald-500">
                     <span
                       class="inline-block h-1 w-1 rounded-full bg-emerald-500 mr-0.5 align-middle"
@@ -325,7 +332,7 @@
                   {#each group.items as platform}
                     {@const isLocal = platform.category === "local"}
                     {@const lps = isLocal ? localProxyStatuses?.[platform.id] : undefined}
-                    {@const hasCred = !!findCredential(platformCredentials, platform.id)?.api_key}
+                    {@const hasCred = platformHasConfiguredAuth(platformCredentials, platform.id)}
                     {@const isSelected = platform.id === platformId}
                     <button
                       class="flex w-full items-center gap-1.5 rounded-sm px-1.5 py-1 text-xs hover:bg-accent/70 transition-colors"
@@ -338,9 +345,11 @@
                             : lps?.running && lps.needsAuth
                               ? 'bg-amber-500'
                               : 'bg-muted-foreground/30'
-                          : hasCred
-                            ? 'bg-emerald-500'
-                            : 'bg-muted-foreground/30'}"
+                          : platform.id === 'bedrock'
+                            ? 'bg-blue-500'
+                            : hasCred
+                              ? 'bg-emerald-500'
+                              : 'bg-muted-foreground/30'}"
                       ></span>
                       <span
                         class="flex-1 min-w-0 text-left truncate {isSelected

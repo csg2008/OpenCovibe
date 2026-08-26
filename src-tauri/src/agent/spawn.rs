@@ -514,6 +514,32 @@ mod tests {
     }
 
     #[test]
+    fn codex_bedrock_uses_responses_endpoint_and_bearer_env() {
+        use crate::models::CodexProviderCredential;
+        let provider = CodexProviderCredential {
+            id: "bedrock".into(),
+            name: "Amazon Bedrock".into(),
+            base_url: "https://bedrock-runtime.eu-central-1.amazonaws.com/openai/v1".into(),
+            env_key: "AWS_BEARER_TOKEN_BEDROCK".into(),
+            wire_api: "responses".into(),
+            model: "eu.anthropic.claude-sonnet-4-6-v1".into(),
+            api_key: Some("bedrock-secret".into()),
+        };
+
+        let args = codex_provider_config_args(&provider).join(" ");
+        assert!(args.contains("model_provider=\"bedrock\""));
+        assert!(args.contains(
+            "model_providers.bedrock.base_url=\"https://bedrock-runtime.eu-central-1.amazonaws.com/openai/v1\""
+        ));
+        assert!(args.contains("model_providers.bedrock.env_key=\"AWS_BEARER_TOKEN_BEDROCK\""));
+        assert!(args.contains("model_providers.bedrock.wire_api=\"responses\""));
+        assert_eq!(
+            codex_provider_env(&provider),
+            Some(("AWS_BEARER_TOKEN_BEDROCK".into(), "bedrock-secret".into()))
+        );
+    }
+
+    #[test]
     fn codex_ignore_rules_flag() {
         let mut s = make_settings();
         s.ignore_rules = true;

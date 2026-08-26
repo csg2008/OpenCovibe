@@ -596,40 +596,31 @@ fn copy_bus_events_from_reader<R: BufRead, W: Write>(
 
 /// Extract aggregated usage from bus-events for a single run.
 ///
-/// Three modes:
-/// - CLI imports (source=cli_import): per-turn cost+tokens, sum all
-/// - Codex (agent=codex): per-turn tokens, sum all; cost estimated in stats.rs
-/// - Claude native sessions: cumulative cost (peak-detect), cumulative tokens (take-last)
+/// Two transport contracts:
+/// - CLI imports and Codex exec: per-turn cost/tokens, sum all
+/// - Claude and Codex app-server: cumulative cost (peak-detect), cumulative tokens (take-last)
 pub fn extract_run_usage(run_id: &str) -> Option<RawRunUsage> {
     let path = events_path(run_id);
     if !path.exists() {
         return None;
     }
 
-    // Run-scoped detection: parse meta.json once for source + agent
-    let (is_per_turn_cost, is_codex) = {
-        let meta_path = super::run_dir(run_id).join("meta.json");
-        let meta_val = meta_path
-            .exists()
-            .then(|| {
-                fs::read_to_string(&meta_path)
-                    .ok()
-                    .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
-            })
-            .flatten();
-        let source = meta_val
-            .as_ref()
-            .and_then(|v| v.get("source").and_then(|s| s.as_str()).map(String::from));
-        let agent = meta_val
-            .as_ref()
-            .and_then(|v| v.get("agent").and_then(|s| s.as_str()).map(String::from));
-        (
-            source == Some("cli_import".to_string()),
-            agent == Some("codex".to_string()),
-        )
-    };
-    // Codex turn.completed.usage is per-turn (same as CLI imports)
-    let sum_usage = is_per_turn_cost || is_codex;
+    // Run-scoped detection: parse meta.json once for transport and billing semantics.
+    let meta_path = super::run_dir(run_id).join("meta.json");
+    let meta_val = meta_path
+        .exists()
+        .then(|| {
+            fs::read_to_string(&meta_path)
+                .ok()
+                .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
+        })
+        .flatten();
+    let is_per_turn_usage = meta_val.as_ref().is_some_and(usage_events_are_per_turn);
+    let is_codex = meta_val
+        .as_ref()
+        .and_then(|meta| meta.get("agent"))
+        .and_then(|value| value.as_str())
+        == Some("codex");
 
     let content = fs::read_to_string(&path).ok()?;
 
@@ -638,6 +629,7 @@ pub fn extract_run_usage(run_id: &str) -> Option<RawRunUsage> {
     let mut peak_cost: f64 = 0.0;
     let mut total_duration_ms: u64 = 0;
     let mut found_any = false;
+    let mut cost_available = true;
 
     // "Simpler v1": take values from the last usage_update event
     let mut last_input: u64 = 0;
@@ -676,9 +668,10 @@ pub fn extract_run_usage(run_id: &str) -> Option<RawRunUsage> {
             .get("total_cost_usd")
             .and_then(|v| v.as_f64())
             .unwrap_or(0.0);
+        cost_available &= event_cost_available(event, is_codex);
 
-        if sum_usage {
-            // CLI imports + Codex: per-turn cost, sum directly
+        if is_per_turn_usage {
+            // CLI imports + Codex exec: per-turn cost, sum directly.
             total_cost += cost;
         } else {
             // Native Claude session: cumulative cost, peak-detect
@@ -692,8 +685,8 @@ pub fn extract_run_usage(run_id: &str) -> Option<RawRunUsage> {
             prev_cost = cost;
         }
 
-        // Tokens: for per-turn (CLI imports + Codex), sum; for cumulative, take last
-        if sum_usage {
+        // Tokens: sum per-turn transports; take the latest app-server/Claude cumulative total.
+        if is_per_turn_usage {
             last_input += event
                 .get("input_tokens")
                 .and_then(|v| v.as_u64())
@@ -784,7 +777,7 @@ pub fn extract_run_usage(run_id: &str) -> Option<RawRunUsage> {
     }
 
     // Add final segment's peak cost (only for cumulative mode)
-    if !sum_usage {
+    if !is_per_turn_usage {
         total_cost += peak_cost;
     }
 
@@ -800,6 +793,7 @@ pub fn extract_run_usage(run_id: &str) -> Option<RawRunUsage> {
 
     Some(RawRunUsage {
         total_cost_usd: total_cost,
+        cost_available,
         input_tokens: last_input,
         output_tokens: last_output,
         cache_read_tokens: last_cache_read,
@@ -808,6 +802,36 @@ pub fn extract_run_usage(run_id: &str) -> Option<RawRunUsage> {
         num_turns: last_num_turns,
         model_usage: last_model_usage,
     })
+}
+
+/// Usage events follow the transport contract, not the agent name: Codex exec/import events are
+/// per-turn deltas, while Claude and Codex app-server events carry cumulative session totals.
+pub(crate) fn usage_events_are_per_turn(meta: &serde_json::Value) -> bool {
+    if meta.get("source").and_then(|value| value.as_str()) == Some("cli_import") {
+        return true;
+    }
+    if meta.get("agent").and_then(|value| value.as_str()) != Some("codex") {
+        return false;
+    }
+    // Legacy Codex runs predate execution_path and used exec exclusively.
+    meta.get("execution_path")
+        .and_then(|value| value.as_str())
+        .is_none_or(|path| path == "pipe_exec")
+}
+
+fn event_cost_available(event: &serde_json::Value, is_codex: bool) -> bool {
+    event
+        .get("cost_available")
+        .and_then(|value| value.as_bool())
+        .unwrap_or_else(|| {
+            // Legacy native Codex events carried a synthetic zero without availability metadata.
+            // Imported events may contain a real reconstructed cost and remain usable.
+            !is_codex
+                || event
+                    .get("total_cost_usd")
+                    .and_then(|value| value.as_f64())
+                    .is_some_and(|cost| cost > 0.0)
+        })
 }
 
 /// Count user_message events in events.jsonl for resume baseline.

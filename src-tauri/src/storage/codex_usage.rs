@@ -21,7 +21,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-const DISK_CACHE_VERSION: u32 = 1;
+const DISK_CACHE_VERSION: u32 = 2;
+const PRICING_KEY_SEPARATOR: char = '\u{1f}';
 
 #[derive(Clone, Default, Serialize, Deserialize)]
 struct TokenCounts {
@@ -94,6 +95,7 @@ fn scan_single_rollout(path: &Path) -> FileData {
     };
 
     let mut current_model: Option<String> = None;
+    let mut model_provider: Option<String> = None;
     let mut date_set: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for line in content.lines() {
@@ -106,6 +108,15 @@ fn scan_single_rollout(path: &Path) -> FileData {
         };
 
         let line_type = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
+
+        if line_type == "session_meta" {
+            model_provider = v
+                .get("payload")
+                .and_then(|p| p.get("model_provider"))
+                .and_then(|provider| provider.as_str())
+                .map(str::to_string);
+            continue;
+        }
 
         // Track the session model.
         if line_type == "turn_context" {
@@ -157,16 +168,17 @@ fn scan_single_rollout(path: &Path) -> FileData {
                 Some(ts) if ts.len() >= 10 => ts[..10].to_string(),
                 _ => continue,
             };
-            // Unknown model → label it so it still shows in the table (at $0 cost).
+            // Unknown model stays visible, but pricing is explicitly unavailable.
             let model = current_model
                 .clone()
                 .unwrap_or_else(|| "codex-unknown".to_string());
+            let key = pricing_key(model_provider.as_deref(), &model);
 
             let tc = data
                 .daily
                 .entry(date.clone())
                 .or_default()
-                .entry(model)
+                .entry(key)
                 .or_default();
             tc.input += input;
             tc.cache_read += cached;
@@ -177,6 +189,26 @@ fn scan_single_rollout(path: &Path) -> FileData {
 
     data.dates = date_set.into_iter().collect();
     data
+}
+
+fn pricing_key(provider: Option<&str>, model: &str) -> String {
+    // A native `openai` rollout can be ChatGPT credits or API-key billing. The rollout does not
+    // retain that distinction, so keep it explicitly unpriced instead of guessing API USD cost.
+    let provider = match provider {
+        Some("openai") => Some("codex"),
+        other => other,
+    };
+    format!(
+        "{}{}{}",
+        provider.unwrap_or(""),
+        PRICING_KEY_SEPARATOR,
+        model
+    )
+}
+
+fn split_pricing_key(key: &str) -> (Option<&str>, &str) {
+    let (provider, model) = key.split_once(PRICING_KEY_SEPARATOR).unwrap_or(("", key));
+    ((!provider.is_empty()).then_some(provider), model)
 }
 
 fn disk_cache_path() -> PathBuf {
@@ -242,6 +274,7 @@ pub fn read_global_codex_usage(days: Option<u32>) -> Result<UsageOverview, Strin
 fn empty_overview() -> UsageOverview {
     UsageOverview {
         total_cost_usd: 0.0,
+        cost_complete: true,
         total_tokens: 0,
         total_runs: 0,
         avg_cost_per_run: 0.0,
@@ -270,6 +303,7 @@ fn build_overview(
     let mut model_totals: HashMap<String, ModelAggregate> = HashMap::new();
     let mut total_cost = 0.0f64;
     let mut total_tokens = 0u64;
+    let mut total_cost_complete = true;
 
     let mut dates: Vec<&String> = merged.keys().collect();
     dates.sort();
@@ -284,34 +318,52 @@ fn build_overview(
         let mut day_cost = 0.0f64;
         let mut day_in = 0u64;
         let mut day_out = 0u64;
-        for (model, tc) in models {
-            // Mirror App-scope Codex cost: try_estimate_cost (None → $0 for unknown models).
-            let cost = pricing::try_estimate_cost(model, tc.input, tc.output, tc.cache_read, 0)
-                .unwrap_or(0.0);
+        let mut day_cost_complete = true;
+        for (key, tc) in models {
+            let (provider, model) = split_pricing_key(key);
+            let context =
+                pricing::PricingContext::for_provider(provider.or(Some("codex-unknown-provider")));
+            let estimated = pricing::try_estimate_cost_with_context(
+                model,
+                tc.input,
+                tc.output,
+                tc.cache_read,
+                0,
+                &context,
+            );
+            let cost_complete = estimated.is_some();
+            let cost = estimated.unwrap_or(0.0);
             day_cost += cost;
+            day_cost_complete &= cost_complete;
             day_in += tc.input;
             day_out += tc.output;
 
-            let agg = model_totals.entry(model.clone()).or_insert(ModelAggregate {
-                model: model.clone(),
-                runs: 0,
-                input_tokens: 0,
-                output_tokens: 0,
-                cache_read_tokens: 0,
-                cache_write_tokens: 0,
-                cost_usd: 0.0,
-                pct: 0.0,
-            });
+            let agg = model_totals
+                .entry(model.to_string())
+                .or_insert(ModelAggregate {
+                    model: model.to_string(),
+                    runs: 0,
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    cache_read_tokens: 0,
+                    cache_write_tokens: 0,
+                    cost_usd: 0.0,
+                    cost_complete: true,
+                    pct: 0.0,
+                });
             agg.input_tokens += tc.input;
             agg.output_tokens += tc.output;
             agg.cache_read_tokens += tc.cache_read;
             agg.cost_usd += cost;
+            agg.cost_complete &= cost_complete;
         }
         total_cost += day_cost;
+        total_cost_complete &= day_cost_complete;
         total_tokens += day_in + day_out;
         daily.push(DailyAggregate {
             date: date.clone(),
             cost_usd: day_cost,
+            cost_complete: day_cost_complete,
             runs: 0,
             input_tokens: day_in,
             output_tokens: day_out,
@@ -342,6 +394,7 @@ fn build_overview(
         .map(|d| DailyAggregate {
             date: d.clone(),
             cost_usd: 0.0,
+            cost_complete: true,
             runs: 1,
             input_tokens: 0,
             output_tokens: 0,
@@ -358,6 +411,7 @@ fn build_overview(
     let total_runs = all_dates.len() as u32; // sessions ~ active days; approximate
     UsageOverview {
         total_cost_usd: total_cost,
+        cost_complete: total_cost_complete,
         total_tokens,
         total_runs,
         avg_cost_per_run: 0.0,
@@ -383,6 +437,7 @@ mod tests {
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("rollout-test.jsonl");
         let lines = [
+            r#"{"timestamp":"2026-06-01T09:59:59Z","type":"session_meta","payload":{"model_provider":"openai"}}"#,
             r#"{"timestamp":"2026-06-01T10:00:00Z","type":"turn_context","payload":{"model":"gpt-5.4"}}"#,
             r#"{"timestamp":"2026-06-01T10:00:01Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":40,"output_tokens":10,"reasoning_output_tokens":0},"total_token_usage":{"input_tokens":100}}}}"#,
             r#"{"timestamp":"2026-06-01T10:00:02Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":200,"cached_input_tokens":0,"output_tokens":20,"reasoning_output_tokens":5},"total_token_usage":{"input_tokens":300}}}}"#,
@@ -390,7 +445,7 @@ mod tests {
         std::fs::write(&path, lines.join("\n")).unwrap();
 
         let fd = scan_single_rollout(&path);
-        let tc = &fd.daily["2026-06-01"]["gpt-5.4"];
+        let tc = &fd.daily["2026-06-01"][&pricing_key(Some("openai"), "gpt-5.4")];
         assert_eq!(tc.input, 300, "should sum last_token_usage deltas only");
         assert_eq!(tc.output, 35, "output = 10 + (20+5 reasoning)");
         assert_eq!(tc.cache_read, 40);
@@ -418,5 +473,45 @@ mod tests {
             "unknown model → $0, no Sonnet fallback"
         );
         assert_eq!(ov.total_tokens, 1500);
+        assert!(!ov.cost_complete);
+        assert!(!ov.by_model[0].cost_complete);
+    }
+
+    #[test]
+    fn custom_provider_does_not_inherit_openai_model_price() {
+        let merged = HashMap::from([(
+            "2026-06-01".to_string(),
+            HashMap::from([(
+                pricing_key(Some("vercel"), "gpt-5.6-sol"),
+                TokenCounts {
+                    input: 1_000_000,
+                    output: 0,
+                    cache_read: 0,
+                },
+            )]),
+        )]);
+
+        let overview = build_overview(merged, std::collections::HashSet::new(), None);
+        assert_eq!(overview.total_cost_usd, 0.0);
+        assert!(!overview.cost_complete);
+    }
+
+    #[test]
+    fn native_openai_rollout_does_not_guess_api_billing() {
+        let merged = HashMap::from([(
+            "2026-06-01".to_string(),
+            HashMap::from([(
+                pricing_key(Some("openai"), "gpt-5.6-sol"),
+                TokenCounts {
+                    input: 1_000_000,
+                    output: 0,
+                    cache_read: 0,
+                },
+            )]),
+        )]);
+
+        let overview = build_overview(merged, std::collections::HashSet::new(), None);
+        assert_eq!(overview.total_cost_usd, 0.0);
+        assert!(!overview.cost_complete);
     }
 }

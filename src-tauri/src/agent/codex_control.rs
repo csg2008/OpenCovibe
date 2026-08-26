@@ -45,10 +45,15 @@ pub fn fallback_models() -> CodexModelList {
     };
     CodexModelList {
         models: vec![
-            mk("gpt-5.5", "GPT-5.5", "Frontier coding model"),
-            mk("gpt-5.4", "GPT-5.4", "Everyday coding"),
+            mk("gpt-5.6-sol", "GPT-5.6 Sol", "Flagship coding model"),
+            mk("gpt-5.6-terra", "GPT-5.6 Terra", "Balanced coding model"),
+            mk(
+                "gpt-5.6-luna",
+                "GPT-5.6 Luna",
+                "Fast, economical coding model",
+            ),
         ],
-        default_model: Some("gpt-5.5".to_string()),
+        default_model: Some("gpt-5.6-sol".to_string()),
     }
 }
 
@@ -384,6 +389,6 @@ mod tests {
     fn fallback_is_non_empty() {
         let fb = fallback_models();
         assert!(!fb.models.is_empty());
-        assert_eq!(fb.default_model.as_deref(), Some("gpt-5.5"));
+        assert_eq!(fb.default_model.as_deref(), Some("gpt-5.6-sol"));
     }
 }

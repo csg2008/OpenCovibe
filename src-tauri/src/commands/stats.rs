@@ -38,6 +38,7 @@ fn merge_overviews(a: UsageOverview, b: UsageOverview) -> UsageOverview {
     let total_cost = a.total_cost_usd + b.total_cost_usd;
     let total_tokens = a.total_tokens + b.total_tokens;
     let total_runs = a.total_runs + b.total_runs;
+    let cost_complete = a.cost_complete && b.cost_complete;
 
     // by_model: aggregate by model name (Claude/Codex names are distinct in practice).
     let mut model_map: HashMap<String, ModelAggregate> = HashMap::new();
@@ -52,6 +53,7 @@ fn merge_overviews(a: UsageOverview, b: UsageOverview) -> UsageOverview {
                 cache_read_tokens: 0,
                 cache_write_tokens: 0,
                 cost_usd: 0.0,
+                cost_complete: true,
                 pct: 0.0,
             });
         e.runs += m.runs;
@@ -60,6 +62,7 @@ fn merge_overviews(a: UsageOverview, b: UsageOverview) -> UsageOverview {
         e.cache_read_tokens += m.cache_read_tokens;
         e.cache_write_tokens += m.cache_write_tokens;
         e.cost_usd += m.cost_usd;
+        e.cost_complete &= m.cost_complete;
     }
     let mut by_model: Vec<ModelAggregate> = model_map.into_values().collect();
     for m in &mut by_model {
@@ -82,6 +85,7 @@ fn merge_overviews(a: UsageOverview, b: UsageOverview) -> UsageOverview {
         match day_map.get_mut(&d.date) {
             Some(e) => {
                 e.cost_usd += d.cost_usd;
+                e.cost_complete &= d.cost_complete;
                 e.runs += d.runs;
                 e.input_tokens += d.input_tokens;
                 e.output_tokens += d.output_tokens;
@@ -108,6 +112,7 @@ fn merge_overviews(a: UsageOverview, b: UsageOverview) -> UsageOverview {
 
     UsageOverview {
         total_cost_usd: total_cost,
+        cost_complete,
         total_tokens,
         total_runs,
         avg_cost_per_run: if total_runs > 0 {
@@ -134,6 +139,7 @@ struct ModelAggBuilder {
     cache_read_tokens: u64,
     cache_write_tokens: u64,
     cost_usd: f64,
+    has_unpriced_usage: bool,
 }
 
 /// Daily aggregate builder (internal, not serialized).
@@ -143,6 +149,7 @@ struct DailyBuilder {
     runs: u32,
     input_tokens: u64,
     output_tokens: u64,
+    has_unpriced_usage: bool,
 }
 
 #[tauri::command]
@@ -180,6 +187,7 @@ pub fn get_usage_overview(days: Option<u32>) -> Result<UsageOverview, String> {
         let usage = storage::events::extract_run_usage(&meta.id);
 
         let mut cost = usage.as_ref().map(|u| u.total_cost_usd).unwrap_or(0.0);
+        let mut cost_available = usage.as_ref().is_none_or(|u| u.cost_available);
         // total_tokens = input + output (billable tokens only, not cache)
         let tokens = usage
             .as_ref()
@@ -199,6 +207,7 @@ pub fn get_usage_overview(days: Option<u32>) -> Result<UsageOverview, String> {
                     agg.cache_read_tokens += mu.cache_read_tokens;
                     agg.cache_write_tokens += mu.cache_write_tokens;
                     agg.cost_usd += mu.cost_usd;
+                    agg.has_unpriced_usage |= !cost_available;
                 }
             } else if meta.agent == "codex"
                 && (u.input_tokens > 0 || u.output_tokens > 0)
@@ -208,18 +217,27 @@ pub fn get_usage_overview(days: Option<u32>) -> Result<UsageOverview, String> {
                 // try_estimate_cost returns None for unknown models (e.g. gpt-oss-*)
                 // so we don't produce wrong estimates via the Sonnet fallback.
                 let model_name = meta.model.as_deref().unwrap();
-                let estimated = crate::pricing::try_estimate_cost(
+                let provider = match meta.platform_id.as_deref() {
+                    // Older runs inferred `openai` from Claude's auth_mode, which says nothing
+                    // about whether Codex used ChatGPT credits or API-key billing.
+                    Some("openai") => Some("codex"),
+                    provider => provider.or(Some("codex-unknown-provider")),
+                };
+                let context = crate::pricing::PricingContext::for_provider(provider);
+                let estimated = crate::pricing::try_estimate_cost_with_context(
                     model_name,
                     u.input_tokens,
                     u.output_tokens,
                     u.cache_read_tokens,
                     u.cache_write_tokens,
+                    &context,
                 );
                 if let Some(est) = estimated {
                     if cost < 0.000001 && est > 0.0 {
                         cost = est;
                         cost_estimated = true;
                     }
+                    cost_available = true;
                     // Synthesize single-model entry for by-model table
                     let agg = model_map.entry(model_name.to_string()).or_default();
                     agg.runs += 1;
@@ -229,13 +247,14 @@ pub fn get_usage_overview(days: Option<u32>) -> Result<UsageOverview, String> {
                     agg.cache_write_tokens += u.cache_write_tokens;
                     agg.cost_usd += est;
                 } else {
-                    // Unknown model: still show in by-model table but with $0 cost
+                    cost_available = false;
                     let agg = model_map.entry(model_name.to_string()).or_default();
                     agg.runs += 1;
                     agg.input_tokens += u.input_tokens;
                     agg.output_tokens += u.output_tokens;
                     agg.cache_read_tokens += u.cache_read_tokens;
                     agg.cache_write_tokens += u.cache_write_tokens;
+                    agg.has_unpriced_usage = true;
                 }
             }
         }
@@ -250,6 +269,7 @@ pub fn get_usage_overview(days: Option<u32>) -> Result<UsageOverview, String> {
         day.runs += 1;
         day.input_tokens += usage.as_ref().map(|u| u.input_tokens).unwrap_or(0);
         day.output_tokens += usage.as_ref().map(|u| u.output_tokens).unwrap_or(0);
+        day.has_unpriced_usage |= !cost_available;
 
         // Build run summary (merge RunMeta + RawRunUsage)
         let name = meta.name.clone().unwrap_or_else(|| {
@@ -269,6 +289,7 @@ pub fn get_usage_overview(days: Option<u32>) -> Result<UsageOverview, String> {
             started_at: meta.started_at.clone(),
             ended_at: meta.ended_at.clone(),
             total_cost_usd: cost,
+            cost_available,
             input_tokens: usage.as_ref().map(|u| u.input_tokens).unwrap_or(0),
             output_tokens: usage.as_ref().map(|u| u.output_tokens).unwrap_or(0),
             cache_read_tokens: usage.as_ref().map(|u| u.cache_read_tokens).unwrap_or(0),
@@ -310,6 +331,7 @@ pub fn get_usage_overview(days: Option<u32>) -> Result<UsageOverview, String> {
                 cache_read_tokens: agg.cache_read_tokens,
                 cache_write_tokens: agg.cache_write_tokens,
                 cost_usd: agg.cost_usd,
+                cost_complete: !agg.has_unpriced_usage,
                 pct,
             }
         })
@@ -326,6 +348,7 @@ pub fn get_usage_overview(days: Option<u32>) -> Result<UsageOverview, String> {
         .map(|(date, d)| DailyAggregate {
             date,
             cost_usd: d.cost_usd,
+            cost_complete: !d.has_unpriced_usage,
             runs: d.runs,
             input_tokens: d.input_tokens,
             output_tokens: d.output_tokens,
@@ -349,6 +372,7 @@ pub fn get_usage_overview(days: Option<u32>) -> Result<UsageOverview, String> {
 
     Ok(UsageOverview {
         total_cost_usd: total_cost,
+        cost_complete: run_summaries.iter().all(|run| run.cost_available),
         total_tokens,
         total_runs,
         avg_cost_per_run: avg_cost,
@@ -376,6 +400,7 @@ struct HeatmapDayBuilder {
     runs: u32,
     input_tokens: u64,
     output_tokens: u64,
+    has_unpriced_usage: bool,
 }
 
 /// Strip model_breakdown, sort by date ascending, truncate to at most 365 entries.
@@ -412,6 +437,7 @@ fn get_app_heatmap_daily() -> Result<Vec<DailyAggregate>, String> {
         let day = daily_map.entry(date).or_default();
         let usage = storage::events::extract_run_usage(&meta.id);
         day.cost_usd += usage.as_ref().map(|u| u.total_cost_usd).unwrap_or(0.0);
+        day.has_unpriced_usage |= usage.as_ref().is_some_and(|u| !u.cost_available);
         day.runs += 1;
         day.input_tokens += usage.as_ref().map(|u| u.input_tokens).unwrap_or(0);
         day.output_tokens += usage.as_ref().map(|u| u.output_tokens).unwrap_or(0);
@@ -422,6 +448,7 @@ fn get_app_heatmap_daily() -> Result<Vec<DailyAggregate>, String> {
         .map(|(date, d)| DailyAggregate {
             date,
             cost_usd: d.cost_usd,
+            cost_complete: !d.has_unpriced_usage,
             runs: d.runs,
             input_tokens: d.input_tokens,
             output_tokens: d.output_tokens,
@@ -508,6 +535,7 @@ mod tests {
             daily.push(DailyAggregate {
                 date: format!("2025-{:02}-{:02}", (i / 28) % 12 + 1, i % 28 + 1),
                 cost_usd: 0.0,
+                cost_complete: true,
                 runs: 1,
                 input_tokens: 0,
                 output_tokens: 0,
@@ -527,6 +555,7 @@ mod tests {
             DailyAggregate {
                 date: "2026-02-03".to_string(),
                 cost_usd: 0.0,
+                cost_complete: true,
                 runs: 1,
                 input_tokens: 0,
                 output_tokens: 0,
@@ -538,6 +567,7 @@ mod tests {
             DailyAggregate {
                 date: "2026-02-01".to_string(),
                 cost_usd: 0.0,
+                cost_complete: true,
                 runs: 1,
                 input_tokens: 0,
                 output_tokens: 0,
@@ -549,6 +579,7 @@ mod tests {
             DailyAggregate {
                 date: "2026-02-02".to_string(),
                 cost_usd: 0.0,
+                cost_complete: true,
                 runs: 1,
                 input_tokens: 0,
                 output_tokens: 0,
@@ -569,6 +600,7 @@ mod tests {
         let daily = vec![DailyAggregate {
             date: "2026-02-01".to_string(),
             cost_usd: 0.0,
+            cost_complete: true,
             runs: 1,
             input_tokens: 0,
             output_tokens: 0,

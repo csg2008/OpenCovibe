@@ -26,12 +26,10 @@
   // Derived display values
   let totalCostDisplay = $derived.by(() => {
     if (!response) return "$0.00";
-    return `$${response.facets.totalCost.toFixed(2)}`;
+    return response.facets.costComplete ? `$${response.facets.totalCost.toFixed(2)}` : "\u2014";
   });
 
-  // Codex has no cost concept (total_cost_usd is always 0). When filtered to Codex-only,
-  // suppress the "$0.00 total cost" header — it would be structurally meaningless.
-  let costMeaningful = $derived(!(filters.agents?.length === 1 && filters.agents[0] === "codex"));
+  let costMeaningful = $derived(!!response);
 
   function projectDisplayName(cwd: string): string {
     const parts = cwd.replace(/\\/g, "/").split("/");
@@ -560,7 +558,7 @@
               <!-- Right side -->
               <div class="shrink-0 text-right">
                 <div class="text-sm font-medium text-foreground">
-                  {formatCost(run.totalCostUsd)}
+                  {run.costAvailable ? formatCost(run.totalCostUsd) : "\u2014"}
                 </div>
                 <div class="mt-0.5 text-xs text-muted-foreground">
                   {t("history_turns", { count: String(run.numTurns) })}

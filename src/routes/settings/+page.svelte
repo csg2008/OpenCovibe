@@ -27,9 +27,12 @@
     findCredential,
     expandModelsToTiers,
     compressModelsFromTiers,
+    globalClaudeAuthPatch,
   } from "$lib/utils/platform-presets";
   import type { PlatformPreset, PlatformCredential, CodexProviderCredential } from "$lib/types";
   import {
+    bedrockRegionFromBaseUrl,
+    bedrockRuntimeBaseUrl,
     CODEX_PROVIDER_PRESETS,
     type CodexProviderPreset,
   } from "$lib/utils/codex-provider-presets";
@@ -114,6 +117,12 @@
   // Track whether user manually edited extra_env (per platform ID).
   // Untouched platforms don't write extra_env, avoiding preset defaults being baked into credentials.
   let extraEnvTouched = $state<Record<string, boolean>>({});
+  const BEDROCK_MANAGED_ENV_KEYS = new Set([
+    "CLAUDE_CODE_USE_BEDROCK",
+    "AWS_REGION",
+    "AWS_PROFILE",
+    "ANTHROPIC_BEDROCK_SERVICE_TIER",
+  ]);
 
   // CLI Auth state
   let authOverview = $state<import("$lib/types").AuthOverview | null>(null);
@@ -695,10 +704,16 @@
       void saveCodexProvider(null);
       return;
     }
+    const providerChanged = codexProviderId !== preset.id;
     codexProviderId = preset.id;
     codexProviderModel = preset.model;
     codexProviderBaseUrl = preset.base_url;
-    if (preset.keyless) codexProviderKey = "";
+    if (providerChanged || preset.keyless) codexProviderKey = "";
+  }
+
+  function setCodexBedrockRegion(region: string) {
+    const normalized = region.trim();
+    if (normalized) codexProviderBaseUrl = bedrockRuntimeBaseUrl(normalized);
   }
 
   async function saveCodexProvider(clear?: null) {
@@ -1327,8 +1342,7 @@
   function syncAndSave(platformId: string) {
     const preset = PLATFORM_PRESETS.find((p) => p.id === platformId);
     saveGeneralPatch({
-      anthropic_api_key: anthropicApiKey || undefined,
-      anthropic_base_url: anthropicBaseUrl || undefined,
+      ...globalClaudeAuthPatch(platformId, anthropicApiKey, anthropicBaseUrl),
       auth_env_var: preset?.auth_env_var,
       active_platform_id: platformId,
       platform_credentials: platformCredentials,
@@ -1337,6 +1351,22 @@
 
   function markExtraEnvTouched() {
     if (selectedPlatformId) extraEnvTouched[selectedPlatformId] = true;
+  }
+
+  function getPlatformEnvValue(key: string): string {
+    return platformExtraEnv.find((entry) => entry.key === key)?.value ?? "";
+  }
+
+  function setPlatformEnvValue(key: string, value: string) {
+    const index = platformExtraEnv.findIndex((entry) => entry.key === key);
+    if (!value) {
+      if (index >= 0) platformExtraEnv = platformExtraEnv.filter((_, i) => i !== index);
+    } else if (index >= 0) {
+      platformExtraEnv[index].value = value;
+    } else {
+      platformExtraEnv = [...platformExtraEnv, { key, value }];
+    }
+    markExtraEnvTouched();
   }
 
   /**
@@ -2813,7 +2843,9 @@
                 <!-- API Key input -->
                 <div>
                   <label class="text-sm font-medium mb-1.5 block" for="api-key"
-                    >{t("settings_general_apiKey")}</label
+                    >{selectedPlatformId === "bedrock"
+                      ? t("settings_bedrock_apiKey")
+                      : t("settings_general_apiKey")}</label
                   >
                   <div class="mt-1 flex gap-2">
                     <div class="flex-1 relative">
@@ -2831,7 +2863,7 @@
                     >
                       {showApiKey ? t("settings_general_hide") : t("settings_general_show")}
                     </button>
-                    {#if selectedPlatform?.category !== "local"}
+                    {#if selectedPlatform?.category !== "local" && selectedPlatformId !== "bedrock"}
                       {@const cred = findCredential(platformCredentials, selectedPlatformId ?? "")}
                       {@const authEnvVar =
                         cred?.auth_env_var || selectedPlatform?.auth_env_var || "ANTHROPIC_API_KEY"}
@@ -2942,6 +2974,10 @@
                     </div>
                   {:else if selectedPlatform?.id === "ollama"}
                     <p class="mt-1 text-xs text-muted-foreground">{t("setup_noKeyNeeded")}</p>
+                  {:else if selectedPlatformId === "bedrock"}
+                    <p class="mt-1 text-xs text-muted-foreground">
+                      {t("settings_bedrock_apiKeyHelp")}
+                    </p>
                   {:else}
                     <p class="mt-1 text-xs text-muted-foreground">
                       {t("settings_general_apiKeyStored")}
@@ -2949,31 +2985,87 @@
                   {/if}
                 </div>
 
+                {#if selectedPlatformId === "bedrock"}
+                  <div class="grid gap-3 sm:grid-cols-2">
+                    <div>
+                      <label class="text-sm font-medium mb-1.5 block" for="bedrock-region"
+                        >{t("settings_bedrock_region")}</label
+                      >
+                      <input
+                        id="bedrock-region"
+                        value={getPlatformEnvValue("AWS_REGION")}
+                        placeholder="us-east-1"
+                        class="w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-xs"
+                        oninput={(e) => setPlatformEnvValue("AWS_REGION", e.currentTarget.value)}
+                        onblur={() => persistCurrentPlatform()}
+                      />
+                    </div>
+                    <div>
+                      <label class="text-sm font-medium mb-1.5 block" for="bedrock-profile"
+                        >{t("settings_bedrock_profile")}</label
+                      >
+                      <input
+                        id="bedrock-profile"
+                        value={getPlatformEnvValue("AWS_PROFILE")}
+                        placeholder="default"
+                        class="w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-xs"
+                        oninput={(e) => setPlatformEnvValue("AWS_PROFILE", e.currentTarget.value)}
+                        onblur={() => persistCurrentPlatform()}
+                      />
+                    </div>
+                    <div class="sm:col-span-2">
+                      <label class="text-sm font-medium mb-1.5 block" for="bedrock-service-tier"
+                        >{t("settings_bedrock_serviceTier")}</label
+                      >
+                      <select
+                        id="bedrock-service-tier"
+                        class="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                        value={getPlatformEnvValue("ANTHROPIC_BEDROCK_SERVICE_TIER") || "default"}
+                        onchange={(e) => {
+                          const value = e.currentTarget.value;
+                          setPlatformEnvValue(
+                            "ANTHROPIC_BEDROCK_SERVICE_TIER",
+                            value === "default" ? "" : value,
+                          );
+                          persistCurrentPlatform();
+                        }}
+                      >
+                        <option value="default">default</option>
+                        <option value="flex">flex</option>
+                        <option value="priority">priority</option>
+                      </select>
+                      <p class="mt-1 text-xs text-muted-foreground">
+                        {t("settings_bedrock_credentialsHelp")}
+                      </p>
+                    </div>
+                  </div>
+                {/if}
+
                 <!-- Base URL (only show for custom or direct editing) -->
-                <div>
-                  <label class="text-sm font-medium mb-1.5 block" for="base-url"
-                    >{t("settings_general_baseUrl")}</label
-                  >
-                  <Input
-                    bind:value={anthropicBaseUrl}
-                    placeholder="https://api.anthropic.com"
-                    class="mt-1 font-mono text-xs"
-                    disabled={selectedPlatformId !== null &&
-                      selectedPlatformId !== "anthropic" &&
-                      selectedPlatform?.category !== "local" &&
-                      !isCustomPlatform(selectedPlatformId ?? "")}
-                    onblur={() => persistCurrentPlatform()}
-                  />
-                  <p class="mt-1 text-xs text-muted-foreground">
-                    {#if selectedPlatform && selectedPlatform.auth_env_var === "ANTHROPIC_AUTH_TOKEN"}
-                      {t("setup_authTypeBearer")}
-                    {:else if selectedPlatform && selectedPlatform.auth_env_var === "ANTHROPIC_API_KEY"}
-                      {t("setup_authTypeApiKey")}
-                    {:else}
-                      {t("settings_general_baseUrlHelp")}
-                    {/if}
-                  </p>
-                </div>
+                {#if selectedPlatformId !== "bedrock"}<div>
+                    <label class="text-sm font-medium mb-1.5 block" for="base-url"
+                      >{t("settings_general_baseUrl")}</label
+                    >
+                    <Input
+                      bind:value={anthropicBaseUrl}
+                      placeholder="https://api.anthropic.com"
+                      class="mt-1 font-mono text-xs"
+                      disabled={selectedPlatformId !== null &&
+                        selectedPlatformId !== "anthropic" &&
+                        selectedPlatform?.category !== "local" &&
+                        !isCustomPlatform(selectedPlatformId ?? "")}
+                      onblur={() => persistCurrentPlatform()}
+                    />
+                    <p class="mt-1 text-xs text-muted-foreground">
+                      {#if selectedPlatform && selectedPlatform.auth_env_var === "ANTHROPIC_AUTH_TOKEN"}
+                        {t("setup_authTypeBearer")}
+                      {:else if selectedPlatform && selectedPlatform.auth_env_var === "ANTHROPIC_API_KEY"}
+                        {t("setup_authTypeApiKey")}
+                      {:else}
+                        {t("settings_general_baseUrlHelp")}
+                      {/if}
+                    </p>
+                  </div>{/if}
 
                 <!-- Models (3-tier: Opus / Sonnet / Haiku) -->
                 {@const [presetOpus, presetSonnet, presetHaiku] = expandModelsToTiers(
@@ -3025,6 +3117,11 @@
                   <p class="mt-1 text-xs text-muted-foreground">
                     {t("settings_general_modelsHelp")}
                   </p>
+                  {#if selectedPlatformId === "bedrock"}
+                    <p class="mt-1 text-xs text-amber-600 dark:text-amber-400">
+                      {t("settings_bedrock_modelRegionHelp")}
+                    </p>
+                  {/if}
                 </div>
 
                 <!-- Extra Environment Variables -->
@@ -3033,44 +3130,46 @@
                     {t("settings_general_extraEnv")}
                   </label>
                   {#each platformExtraEnv as envVar, i}
-                    <div class="flex gap-1.5 mt-1.5">
-                      <Input
-                        bind:value={envVar.key}
-                        placeholder={t("settings_general_envKeyPlaceholder")}
-                        class="flex-1 font-mono text-xs"
-                        oninput={() => markExtraEnvTouched()}
-                        onblur={() => persistCurrentPlatform()}
-                        onpaste={(e: ClipboardEvent) => handleEnvKeyPaste(e, i)}
-                      />
-                      <Input
-                        bind:value={envVar.value}
-                        placeholder={t("settings_general_envValuePlaceholder")}
-                        class="flex-1 font-mono text-xs"
-                        oninput={() => markExtraEnvTouched()}
-                        onblur={() => persistCurrentPlatform()}
-                      />
-                      <button
-                        class="shrink-0 rounded-md p-1.5 text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors"
-                        aria-label={t("settings_remote_delete")}
-                        onclick={() => {
-                          platformExtraEnv = platformExtraEnv.filter((_, idx) => idx !== i);
-                          markExtraEnvTouched();
-                          persistCurrentPlatform();
-                        }}
-                      >
-                        <svg
-                          class="h-3.5 w-3.5"
-                          viewBox="0 0 24 24"
-                          fill="none"
-                          stroke="currentColor"
-                          stroke-width="2"
-                          stroke-linecap="round"
-                          stroke-linejoin="round"
+                    {#if selectedPlatformId !== "bedrock" || !BEDROCK_MANAGED_ENV_KEYS.has(envVar.key)}
+                      <div class="flex gap-1.5 mt-1.5">
+                        <Input
+                          bind:value={envVar.key}
+                          placeholder={t("settings_general_envKeyPlaceholder")}
+                          class="flex-1 font-mono text-xs"
+                          oninput={() => markExtraEnvTouched()}
+                          onblur={() => persistCurrentPlatform()}
+                          onpaste={(e: ClipboardEvent) => handleEnvKeyPaste(e, i)}
+                        />
+                        <Input
+                          bind:value={envVar.value}
+                          placeholder={t("settings_general_envValuePlaceholder")}
+                          class="flex-1 font-mono text-xs"
+                          oninput={() => markExtraEnvTouched()}
+                          onblur={() => persistCurrentPlatform()}
+                        />
+                        <button
+                          class="shrink-0 rounded-md p-1.5 text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors"
+                          aria-label={t("settings_remote_delete")}
+                          onclick={() => {
+                            platformExtraEnv = platformExtraEnv.filter((_, idx) => idx !== i);
+                            markExtraEnvTouched();
+                            persistCurrentPlatform();
+                          }}
                         >
-                          <path d="M18 6 6 18" /><path d="m6 6 12 12" />
-                        </svg>
-                      </button>
-                    </div>
+                          <svg
+                            class="h-3.5 w-3.5"
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            stroke="currentColor"
+                            stroke-width="2"
+                            stroke-linecap="round"
+                            stroke-linejoin="round"
+                          >
+                            <path d="M18 6 6 18" /><path d="m6 6 12 12" />
+                          </svg>
+                        </button>
+                      </div>
+                    {/if}
                   {/each}
                   <button
                     class="mt-1.5 flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
@@ -3092,7 +3191,9 @@
                     {t("settings_general_addEnvVar")}
                   </button>
                   <p class="mt-1 text-xs text-muted-foreground">
-                    {t("settings_general_extraEnvHelp")}
+                    {selectedPlatformId === "bedrock"
+                      ? t("settings_bedrock_managedEnvHelp")
+                      : t("settings_general_extraEnvHelp")}
                   </p>
                 </div>
               {/if}
@@ -3430,7 +3531,23 @@
                   </div>
 
                   {#if codexProviderPreset}
+                    {@const bedrockIncomplete =
+                      codexProviderPreset.id === "bedrock" &&
+                      (!codexProviderModel.trim() || !codexProviderKey.trim())}
                     <div class="space-y-3 rounded-md border border-border/60 p-4">
+                      {#if codexProviderPreset.id === "bedrock"}
+                        <div>
+                          <span class="text-xs font-medium text-muted-foreground"
+                            >{t("settings_bedrock_region")}</span
+                          >
+                          <input
+                            class="mt-1 w-full rounded-md border px-3 py-2 text-sm bg-background font-mono"
+                            placeholder="us-east-1"
+                            value={bedrockRegionFromBaseUrl(codexProviderBaseUrl) ?? ""}
+                            oninput={(e) => setCodexBedrockRegion(e.currentTarget.value)}
+                          />
+                        </div>
+                      {/if}
                       <!-- Base URL (editable for custom, shown read-only otherwise) -->
                       <div>
                         <span class="text-xs font-medium text-muted-foreground">Base URL</span>
@@ -3450,20 +3567,32 @@
                       <!-- Model -->
                       <div>
                         <span class="text-xs font-medium text-muted-foreground"
-                          >{t("settings_codexProvider_model")}</span
+                          >{t("settings_codexProvider_model")}{codexProviderPreset.id === "bedrock"
+                            ? " *"
+                            : ""}</span
                         >
                         <input
                           class="mt-1 w-full rounded-md border px-3 py-2 text-sm bg-background font-mono"
-                          placeholder="gpt-5.1"
+                          placeholder={codexProviderPreset.id === "bedrock"
+                            ? t("settings_bedrock_modelPlaceholder")
+                            : "gpt-5.1"}
                           bind:value={codexProviderModel}
                         />
+                        {#if codexProviderPreset.id === "bedrock"}
+                          <p class="text-[11px] text-muted-foreground/70 mt-1">
+                            {t("settings_bedrock_modelRegionHelp")}
+                          </p>
+                        {/if}
                       </div>
 
                       <!-- API key (skipped for keyless local providers) -->
                       {#if !codexProviderPreset.keyless}
                         <div>
                           <span class="text-xs font-medium text-muted-foreground"
-                            >{t("settings_codexProvider_apiKey")}</span
+                            >{t("settings_codexProvider_apiKey")}{codexProviderPreset.id ===
+                            "bedrock"
+                              ? " *"
+                              : ""}</span
                           >
                           <input
                             type="password"
@@ -3472,16 +3601,29 @@
                             bind:value={codexProviderKey}
                           />
                           <p class="text-[11px] text-muted-foreground/70 mt-1">
-                            {t("settings_codexProvider_keyEnvNote", {
-                              env: codexProviderPreset.env_key,
-                            })}
+                            {codexProviderPreset.id === "bedrock"
+                              ? t("settings_bedrock_codexAuthHelp")
+                              : t("settings_codexProvider_keyEnvNote", {
+                                  env: codexProviderPreset.env_key,
+                                })}
                           </p>
                         </div>
                       {/if}
 
-                      <div class="flex justify-end">
+                      <div class="flex items-center justify-between gap-3">
+                        {#if bedrockIncomplete}
+                          <p class="text-xs text-amber-600 dark:text-amber-400">
+                            {t("settings_bedrock_codexRequired")}
+                          </p>
+                        {:else}
+                          <span></span>
+                        {/if}
                         <button
-                          class="rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90"
+                          class="rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
+                          disabled={bedrockIncomplete}
+                          title={bedrockIncomplete
+                            ? t("settings_bedrock_codexRequired")
+                            : undefined}
                           onclick={() => saveCodexProvider()}
                         >
                           {t("settings_codexProvider_save")}

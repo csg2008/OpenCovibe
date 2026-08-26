@@ -160,6 +160,9 @@ fn apply_filters(entries: &[RunIndexEntry], filters: &RunSearchFilters) -> Vec<R
             }
 
             // Cost range
+            if (filters.cost_min.is_some() || filters.cost_max.is_some()) && !e.cost_available {
+                return false;
+            }
             if let Some(min) = filters.cost_min {
                 if e.total_cost_usd < min {
                     return false;
@@ -250,12 +253,14 @@ fn compute_facets(entries: &[RunIndexEntry]) -> RunSearchFacets {
         *agent_counts.entry(e.agent.clone()).or_insert(0) += 1;
 
         // Cost range + total
-        total_cost += e.total_cost_usd;
-        if e.total_cost_usd < min_cost {
-            min_cost = e.total_cost_usd;
-        }
-        if e.total_cost_usd > max_cost {
-            max_cost = e.total_cost_usd;
+        if e.cost_available {
+            total_cost += e.total_cost_usd;
+            if e.total_cost_usd < min_cost {
+                min_cost = e.total_cost_usd;
+            }
+            if e.total_cost_usd > max_cost {
+                max_cost = e.total_cost_usd;
+            }
         }
 
         // Date range
@@ -268,7 +273,7 @@ fn compute_facets(entries: &[RunIndexEntry]) -> RunSearchFacets {
     }
 
     // Handle empty entries
-    if entries.is_empty() {
+    if !entries.iter().any(|entry| entry.cost_available) {
         min_cost = 0.0;
         max_cost = 0.0;
     }
@@ -300,6 +305,7 @@ fn compute_facets(entries: &[RunIndexEntry]) -> RunSearchFacets {
         date_range: [earliest_date, latest_date],
         total_runs: entries.len(),
         total_cost,
+        cost_complete: entries.iter().all(|entry| entry.cost_available),
     }
 }
 
@@ -318,6 +324,7 @@ fn entry_to_result(entry: RunIndexEntry) -> RunSearchResult {
         tool_call_count: entry.tool_call_count,
         files_touched_count: entry.files_touched.len() as u32,
         total_cost_usd: entry.total_cost_usd,
+        cost_available: entry.cost_available,
         input_tokens: entry.input_tokens,
         output_tokens: entry.output_tokens,
         duration_ms: entry.duration_ms,
@@ -347,6 +354,7 @@ mod tests {
             tool_call_count: 5,
             files_touched: vec!["/src/main.ts".to_string(), "/src/auth.ts".to_string()],
             total_cost_usd: 0.5,
+            cost_available: true,
             input_tokens: 1000,
             output_tokens: 500,
             duration_ms: 300000,
@@ -563,6 +571,19 @@ mod tests {
         let result = apply_filters(&entries, &filters);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].run_id, "r2");
+    }
+
+    #[test]
+    fn test_cost_filter_excludes_unavailable_prices() {
+        let mut unavailable = make_entry("r1", "/repo", "claude", "proxy");
+        unavailable.total_cost_usd = 0.0;
+        unavailable.cost_available = false;
+        let filters = RunSearchFilters {
+            cost_max: Some(1.0),
+            ..empty_filters()
+        };
+
+        assert!(apply_filters(&[unavailable], &filters).is_empty());
     }
 
     #[test]

@@ -18,6 +18,16 @@ fn meta_lock(id: &str) -> Arc<Mutex<()>> {
         .clone()
 }
 
+fn codex_pricing_provider_id(settings: &crate::models::UserSettings) -> String {
+    settings
+        .codex_provider
+        .as_ref()
+        .map(|provider| provider.id.clone())
+        // `auth_mode` configures Claude auth; Codex auth lives in `codex login` and may use
+        // ChatGPT credits or an API key. Without an app-managed provider, do not guess USD.
+        .unwrap_or_else(|| "codex".to_string())
+}
+
 /// Execute a read-modify-write on RunMeta under a per-run lock.
 /// Covers active-session hot paths that can race (rename, status, sync).
 pub fn with_meta<F>(id: &str, f: F) -> Result<(), String>
@@ -60,10 +70,11 @@ pub fn create_run(
 
     let settings = super::settings::get_user_settings();
 
-    // Codex uses its own auth (ChatGPT / API key) — skip platform_id fallback
+    // Codex uses its own provider setting; the frontend platform_id belongs to Claude and may
+    // still contain the last Claude selection after switching agents.
     let skip_platform_fallback = agent == "codex";
     let (resolved_pid, resolved_base_url) = if skip_platform_fallback {
-        (platform_id, None)
+        (Some(codex_pricing_provider_id(&settings)), None)
     } else {
         // Use explicit platform_id if provided, otherwise fall back to global active
         let pid = platform_id.or_else(|| settings.active_platform_id.clone());
@@ -581,4 +592,30 @@ pub fn soft_delete_runs(ids: &[String]) -> Result<u32, String> {
 
     log::debug!("[storage/runs] soft_delete_runs: deleted {} runs", count);
     Ok(count)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::codex_pricing_provider_id;
+    use crate::models::{CodexProviderCredential, UserSettings};
+
+    #[test]
+    fn codex_pricing_identity_does_not_reuse_claude_auth_mode() {
+        let mut settings = UserSettings {
+            auth_mode: "api".to_string(),
+            ..UserSettings::default()
+        };
+        assert_eq!(codex_pricing_provider_id(&settings), "codex");
+
+        settings.codex_provider = Some(CodexProviderCredential {
+            id: "vercel".to_string(),
+            name: "Vercel".to_string(),
+            base_url: "https://ai-gateway.vercel.sh/v1".to_string(),
+            env_key: "AI_GATEWAY_API_KEY".to_string(),
+            wire_api: "responses".to_string(),
+            model: "openai/gpt-5.6-sol".to_string(),
+            api_key: None,
+        });
+        assert_eq!(codex_pricing_provider_id(&settings), "vercel");
+    }
 }

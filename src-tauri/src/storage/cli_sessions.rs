@@ -190,8 +190,9 @@ struct TranscriptImporter {
     event_writer: std::sync::Arc<EventWriter>,
     turn_counter: u32,
     pending_usage: Option<Value>, // Current turn's assistant.message.usage candidate
+    pending_usage_timestamp: Option<String>,
     has_usage_update_this_turn: bool, // Whether current turn already has a UsageUpdate
-    pending_model: Option<String>, // Model from last assistant message
+    pending_model: Option<String>,    // Model from last assistant message
     skipped_subtypes: HashMap<String, u64>,
     events_imported: u64,
     events_skipped: u64,
@@ -208,6 +209,7 @@ impl TranscriptImporter {
             event_writer: writer,
             turn_counter: 0,
             pending_usage: None,
+            pending_usage_timestamp: None,
             has_usage_update_this_turn: false,
             pending_model: None,
             skipped_subtypes: HashMap::new(),
@@ -275,13 +277,27 @@ impl TranscriptImporter {
                 .and_then(|v| v.as_u64());
 
             let model = self.pending_model.as_deref().unwrap_or("unknown");
-            let cost = crate::pricing::estimate_cost(
+            let occurred_at = self
+                .pending_usage_timestamp
+                .as_deref()
+                .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok());
+            let context = crate::pricing::PricingContext {
+                occurred_at,
+                context_tokens: Some(
+                    input_tokens + cache_read.unwrap_or(0) + cache_write.unwrap_or(0),
+                ),
+                ..crate::pricing::PricingContext::default()
+            };
+            let cost = crate::pricing::try_estimate_cost_with_context(
                 model,
                 input_tokens,
                 output_tokens,
                 cache_read.unwrap_or(0),
                 cache_write.unwrap_or(0),
+                &context,
             );
+            let cost_available = cost.is_some();
+            let cost = cost.unwrap_or(0.0);
 
             log::debug!(
                 "[cli_sessions] usage synthesized: turn={}, cost={:.6}",
@@ -296,6 +312,7 @@ impl TranscriptImporter {
                 cache_read_tokens: cache_read,
                 cache_write_tokens: cache_write,
                 total_cost_usd: cost,
+                cost_available,
                 turn_index: Some(self.turn_counter),
                 model_usage: None,
                 duration_api_ms: None,
@@ -366,6 +383,7 @@ impl TranscriptImporter {
                 }
                 self.turn_counter += 1;
                 self.pending_usage = None;
+                self.pending_usage_timestamp = None;
                 self.has_usage_update_this_turn = false;
                 self.pending_model = None;
 
@@ -396,6 +414,11 @@ impl TranscriptImporter {
             let message = normalized.get("message").unwrap_or(&normalized);
             if let Some(usage) = message.get("usage") {
                 self.pending_usage = Some(usage.clone());
+                self.pending_usage_timestamp = if ts.is_empty() {
+                    None
+                } else {
+                    Some(ts.clone())
+                };
             }
             if let Some(model) = message.get("model").and_then(|v| v.as_str()) {
                 self.pending_model = Some(model.to_string());
@@ -505,6 +528,7 @@ impl TranscriptImporter {
                 }
                 self.turn_counter += 1;
                 self.pending_usage = None;
+                self.pending_usage_timestamp = None;
                 self.has_usage_update_this_turn = false;
                 self.pending_model = None;
             } else {
@@ -520,6 +544,7 @@ impl TranscriptImporter {
             let message = normalized.get("message").unwrap_or(&normalized);
             if let Some(usage) = message.get("usage") {
                 self.pending_usage = Some(usage.clone());
+                self.pending_usage_timestamp = extract_timestamp(raw_json);
             }
             if let Some(model) = message.get("model").and_then(|v| v.as_str()) {
                 self.pending_model = Some(model.to_string());

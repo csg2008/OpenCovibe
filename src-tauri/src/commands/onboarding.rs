@@ -1,5 +1,5 @@
 use crate::agent::claude_stream;
-use crate::models::{AuthCheckResult, AuthOverview, InstallMethod};
+use crate::models::{AuthCheckResult, AuthOverview, InstallMethod, PlatformCredential};
 use crate::process_ext::HideConsole;
 use crate::storage;
 use tauri::{AppHandle, Emitter};
@@ -393,12 +393,9 @@ pub async fn get_auth_overview() -> Result<AuthOverview, String> {
 
     // 4. Check App platform credentials
     let active_pid = user_settings.active_platform_id.clone();
-    let app_has_credentials = active_pid.as_ref().is_some_and(|pid| {
-        user_settings
-            .platform_credentials
-            .iter()
-            .any(|c| &c.platform_id == pid && c.api_key.as_ref().is_some_and(|k| !k.is_empty()))
-    });
+    let app_has_credentials = active_pid
+        .as_ref()
+        .is_some_and(|pid| app_platform_has_credentials(pid, &user_settings.platform_credentials));
 
     // Platform name: use credential name, fallback to preset name, fallback to pid
     let app_platform_name = active_pid.as_ref().map(|pid| {
@@ -460,6 +457,13 @@ pub async fn remove_cli_api_key() -> Result<(), String> {
 }
 
 // ── Helpers ──
+
+fn app_platform_has_credentials(pid: &str, credentials: &[PlatformCredential]) -> bool {
+    pid == "bedrock"
+        || credentials
+            .iter()
+            .any(|c| c.platform_id == pid && c.api_key.as_ref().is_some_and(|k| !k.is_empty()))
+}
 
 /// Env var names that Claude CLI recognizes for API key authentication.
 const CLI_KEY_ENV_VARS: &[&str] = &["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"];
@@ -779,6 +783,29 @@ async fn check_npm_available() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn credential(platform_id: &str, api_key: Option<&str>) -> PlatformCredential {
+        PlatformCredential {
+            platform_id: platform_id.to_string(),
+            api_key: api_key.map(str::to_string),
+            base_url: None,
+            auth_env_var: None,
+            name: None,
+            models: None,
+            extra_env: None,
+        }
+    }
+
+    #[test]
+    fn app_credentials_distinguish_bedrock_from_local_proxy_availability() {
+        assert!(app_platform_has_credentials("bedrock", &[]));
+        assert!(!app_platform_has_credentials("ollama", &[]));
+        assert!(!app_platform_has_credentials("ccr", &[]));
+        assert!(app_platform_has_credentials(
+            "deepseek",
+            &[credential("deepseek", Some("key"))]
+        ));
+    }
 
     #[test]
     fn preset_name_key_platforms() {

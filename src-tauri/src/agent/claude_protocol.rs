@@ -133,6 +133,8 @@ pub struct ProtocolState {
     /// If CLI doesn't emit `<local-command-stdout>` (cf6 bug), a friendly hint
     /// is emitted as CommandOutput on `result`.
     pending_slash_command: Option<String>,
+    /// OpenCovibe provider preset used for this process. Native CLI auth leaves this unset.
+    pricing_provider_id: Option<String>,
     /// Parsing statistics — accumulated per-session, never reset.
     pub stats: ParserStats,
     /// Log the first stream_event unwrap only (avoid log spam).
@@ -171,6 +173,10 @@ impl ProtocolState {
         self.pending_slash_command = cmd;
     }
 
+    pub fn set_pricing_provider_id(&mut self, provider_id: Option<String>) {
+        self.pricing_provider_id = provider_id;
+    }
+
     pub fn new(is_resume: bool) -> Self {
         Self {
             emitted_tool_ids: HashMap::new(),
@@ -181,6 +187,7 @@ impl ProtocolState {
             is_resume,
             seen_first_init: false,
             pending_slash_command: None,
+            pricing_provider_id: None,
             stats: ParserStats::default(),
             seen_stream_event_envelope: false,
             #[cfg(test)]
@@ -1045,29 +1052,69 @@ impl ProtocolState {
 
                     // Cost source (#149): trust the CLI's reported cost for native Claude/OpenAI
                     // — it knows its own pricing (incl. $0 for subscription/Max plans) and stays
-                    // correct across model releases without app updates. Only recalculate when a
-                    // third-party provider is present, since the CLI mis-prices those as Claude.
-                    let (cost, model_usage) = if let Some(mut mu) = model_usage {
-                        if mu.keys().any(|m| crate::pricing::is_third_party(m)) {
+                    // correct across model releases without app updates. Recalculate only when
+                    // the run names a compatible provider, because the same model ID can be
+                    // served by PAYG, subscription, or proxy routes with different billing.
+                    let provider_requires_recalculation = self
+                        .pricing_provider_id
+                        .as_deref()
+                        .is_some_and(|provider_id| provider_id != "anthropic");
+                    let (cost, model_usage, cost_available) = if let Some(mut mu) = model_usage {
+                        if provider_requires_recalculation {
                             let mut total = 0.0_f64;
+                            let mut complete = true;
                             for (model_name, entry) in mu.iter_mut() {
-                                let recalculated = crate::pricing::estimate_cost(
+                                let tier = usage.get("speed").and_then(|value| value.as_str());
+                                let context = crate::pricing::PricingContext {
+                                    provider_id: self.pricing_provider_id.as_deref(),
+                                    occurred_at: raw
+                                        .get("timestamp")
+                                        .and_then(|value| value.as_str())
+                                        .and_then(|value| {
+                                            chrono::DateTime::parse_from_rfc3339(value).ok()
+                                        })
+                                        .or_else(|| Some(chrono::Utc::now().fixed_offset())),
+                                    service_tier: tier,
+                                    context_tokens: Some(
+                                        entry.input_tokens
+                                            + entry.cache_read_tokens
+                                            + entry.cache_write_tokens,
+                                    ),
+                                };
+                                let recalculated = crate::pricing::try_estimate_cost_with_context(
                                     model_name,
                                     entry.input_tokens,
                                     entry.output_tokens,
                                     entry.cache_read_tokens,
                                     entry.cache_write_tokens,
+                                    &context,
                                 );
+                                complete &= recalculated.is_some();
+                                let recalculated = recalculated.unwrap_or(0.0);
                                 entry.cost_usd = recalculated;
                                 total += recalculated;
                             }
-                            (total, Some(mu))
+                            (total, Some(mu), complete)
+                        } else if self.pricing_provider_id.is_none()
+                            && mu.keys().any(|m| crate::pricing::is_third_party(m))
+                        {
+                            let mut known_total = 0.0_f64;
+                            for (model_name, entry) in mu.iter_mut() {
+                                if crate::pricing::is_third_party(model_name) {
+                                    entry.cost_usd = 0.0;
+                                } else {
+                                    known_total += entry.cost_usd;
+                                }
+                            }
+                            (known_total, Some(mu), false)
                         } else {
                             // Native only — keep the CLI's total_cost_usd and per-model costUSD.
-                            (cost, Some(mu))
+                            (cost, Some(mu), true)
                         }
+                    } else if provider_requires_recalculation {
+                        (0.0, None, false)
                     } else {
-                        (cost, None)
+                        (cost, None, true)
                     };
 
                     let duration_api_ms = raw.get("duration_api_ms").and_then(|v| v.as_u64());
@@ -1118,6 +1165,7 @@ impl ProtocolState {
                         cache_read_tokens: cache_read,
                         cache_write_tokens: cache_write,
                         total_cost_usd: cost,
+                        cost_available,
                         turn_index: None, // Injected by session_actor for user turns
                         model_usage,
                         duration_api_ms,
@@ -2217,6 +2265,115 @@ mod tests {
             !ps.got_result_event,
             "success doesn't set got_result_event (only error does)"
         );
+    }
+
+    #[test]
+    fn provider_pricing_replaces_claude_compatible_reported_cost() {
+        let mut ps = ProtocolState::new(false);
+        ps.set_pricing_provider_id(Some("deepseek".to_string()));
+        let raw = json!({
+            "type": "result",
+            "subtype": "success",
+            "timestamp": "2026-08-25T09:00:00+08:00",
+            "usage": {"input_tokens": 1_000_000, "output_tokens": 0},
+            "cost_usd": 5.0,
+            "modelUsage": {
+                "deepseek-v4-flash": {
+                    "inputTokens": 1_000_000,
+                    "outputTokens": 0,
+                    "cacheReadInputTokens": 0,
+                    "cacheCreationInputTokens": 0,
+                    "costUSD": 5.0
+                }
+            }
+        });
+
+        let events = ps.map_event(RUN, &raw);
+        match &events[0] {
+            BusEvent::UsageUpdate {
+                total_cost_usd,
+                model_usage,
+                ..
+            } => {
+                assert!((*total_cost_usd - 0.44).abs() < f64::EPSILON);
+                assert!(
+                    (model_usage.as_ref().unwrap()["deepseek-v4-flash"].cost_usd - 0.44).abs()
+                        < f64::EPSILON
+                );
+            }
+            other => panic!("expected UsageUpdate, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn missing_provider_identity_does_not_guess_third_party_price() {
+        let mut ps = ProtocolState::new(false);
+        let raw = json!({
+            "type": "result",
+            "subtype": "success",
+            "timestamp": "2026-08-25T09:00:00+08:00",
+            "usage": {"input_tokens": 1_000_000, "output_tokens": 0},
+            "cost_usd": 5.0,
+            "modelUsage": {
+                "deepseek-v4-flash": {
+                    "inputTokens": 1_000_000,
+                    "outputTokens": 0,
+                    "cacheReadInputTokens": 0,
+                    "cacheCreationInputTokens": 0,
+                    "costUSD": 5.0
+                }
+            }
+        });
+
+        match &ps.map_event(RUN, &raw)[0] {
+            BusEvent::UsageUpdate {
+                total_cost_usd,
+                cost_available,
+                model_usage,
+                ..
+            } => {
+                assert_eq!(*total_cost_usd, 0.0);
+                assert!(!cost_available);
+                assert_eq!(
+                    model_usage.as_ref().unwrap()["deepseek-v4-flash"].cost_usd,
+                    0.0
+                );
+            }
+            other => panic!("expected UsageUpdate, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn unavailable_provider_price_is_not_reported_as_free() {
+        let mut ps = ProtocolState::new(false);
+        ps.set_pricing_provider_id(Some("openrouter".to_string()));
+        let raw = json!({
+            "type": "result",
+            "subtype": "success",
+            "usage": {"input_tokens": 1_000, "output_tokens": 100},
+            "cost_usd": 5.0,
+            "modelUsage": {
+                "claude-opus-5": {
+                    "inputTokens": 1_000,
+                    "outputTokens": 100,
+                    "cacheReadInputTokens": 0,
+                    "cacheCreationInputTokens": 0,
+                    "costUSD": 5.0
+                }
+            }
+        });
+
+        match &ps.map_event(RUN, &raw)[0] {
+            BusEvent::UsageUpdate {
+                total_cost_usd,
+                cost_available,
+                ..
+            } => {
+                assert_eq!(*total_cost_usd, 0.0);
+                assert!(!cost_available);
+            }
+            other => panic!("expected UsageUpdate, got {:?}", other),
+        }
     }
 
     #[test]

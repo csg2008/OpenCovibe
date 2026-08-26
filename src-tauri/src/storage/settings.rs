@@ -71,6 +71,20 @@ pub(crate) fn get_provider_info(pid: &str) -> Option<ProviderInfo> {
 fn known_provider_defaults(pid: &str) -> Option<ProviderDefaults> {
     use std::collections::HashMap;
     match pid {
+        "bedrock" => Some(ProviderDefaults {
+            base_url: None,
+            models: Some(vec![
+                "us.anthropic.claude-opus-4-8".to_string(),
+                "us.anthropic.claude-sonnet-4-6".to_string(),
+                "us.anthropic.claude-haiku-4-5-20251001-v1:0".to_string(),
+            ]),
+            extra_env: Some(HashMap::from([
+                ("CLAUDE_CODE_USE_BEDROCK".to_string(), "1".to_string()),
+                ("AWS_REGION".to_string(), "us-east-1".to_string()),
+            ])),
+            key_optional: true,
+            auth_env_var: Some("ANTHROPIC_API_KEY"),
+        }),
         "deepseek" => Some(ProviderDefaults {
             base_url: Some("https://api.deepseek.com/anthropic"),
             // 2 models → [opus+sonnet]=v4-pro[1m], [haiku]=v4-flash (per official CC guide)
@@ -86,8 +100,12 @@ fn known_provider_defaults(pid: &str) -> Option<ProviderDefaults> {
             auth_env_var: None,
         }),
         "kimi" => Some(ProviderDefaults {
-            base_url: Some("https://api.moonshot.cn/anthropic"),
-            models: Some(vec!["kimi-k2.5".to_string(), "kimi-k2".to_string()]),
+            base_url: Some("https://api.moonshot.ai/anthropic"),
+            models: Some(vec![
+                "kimi-k3[1m]".to_string(),
+                "kimi-k2.7-code".to_string(),
+                "kimi-k2.7-code-highspeed".to_string(),
+            ]),
             extra_env: None,
             key_optional: false,
             auth_env_var: None,
@@ -103,12 +121,7 @@ fn known_provider_defaults(pid: &str) -> Option<ProviderDefaults> {
         }),
         "zhipu" => Some(ProviderDefaults {
             base_url: Some("https://open.bigmodel.cn/api/anthropic"),
-            // Tier map per z.ai/bigmodel docs: opus=glm-5.1, sonnet=glm-5-turbo, haiku=glm-4.5-air
-            models: Some(vec![
-                "glm-5.1".to_string(),
-                "glm-5-turbo".to_string(),
-                "glm-4.5-air".to_string(),
-            ]),
+            models: Some(vec!["glm-5.3[1m]".to_string(), "glm-4.7".to_string()]),
             extra_env: Some(HashMap::from([(
                 "API_TIMEOUT_MS".to_string(),
                 "3000000".to_string(),
@@ -118,11 +131,7 @@ fn known_provider_defaults(pid: &str) -> Option<ProviderDefaults> {
         }),
         "zhipu-intl" => Some(ProviderDefaults {
             base_url: Some("https://api.z.ai/api/anthropic"),
-            models: Some(vec![
-                "glm-5.1".to_string(),
-                "glm-5-turbo".to_string(),
-                "glm-4.5-air".to_string(),
-            ]),
+            models: Some(vec!["glm-5.3[1m]".to_string(), "glm-4.7".to_string()]),
             extra_env: Some(HashMap::from([(
                 "API_TIMEOUT_MS".to_string(),
                 "3000000".to_string(),
@@ -133,7 +142,7 @@ fn known_provider_defaults(pid: &str) -> Option<ProviderDefaults> {
         "bailian" => Some(ProviderDefaults {
             base_url: Some("https://coding.dashscope.aliyuncs.com/apps/anthropic"),
             models: Some(vec![
-                "qwen3.5-plus".to_string(),
+                "qwen3.7-plus".to_string(),
                 "qwen3-coder-next".to_string(),
             ]),
             extra_env: None,
@@ -143,7 +152,8 @@ fn known_provider_defaults(pid: &str) -> Option<ProviderDefaults> {
         "bailian-api" => Some(ProviderDefaults {
             base_url: Some("https://dashscope.aliyuncs.com/apps/anthropic"),
             models: Some(vec![
-                "qwen3.5-plus".to_string(),
+                "qwen3.8-max".to_string(),
+                "qwen3.7-plus".to_string(),
                 "qwen3-coder-next".to_string(),
             ]),
             extra_env: None,
@@ -218,7 +228,7 @@ fn known_provider_defaults(pid: &str) -> Option<ProviderDefaults> {
         }),
         "longcat" => Some(ProviderDefaults {
             base_url: Some("https://api.longcat.chat/anthropic"),
-            models: Some(vec!["LongCat-2.0-Preview".to_string()]),
+            models: Some(vec!["LongCat-2.0".to_string()]),
             extra_env: None,
             key_optional: false,
             auth_env_var: None,
@@ -331,6 +341,74 @@ fn known_provider_defaults(pid: &str) -> Option<ProviderDefaults> {
     }
 }
 
+fn models_match(models: &Option<Vec<String>>, expected: &[&str]) -> bool {
+    models.as_ref().is_some_and(|actual| {
+        actual.len() == expected.len()
+            && actual
+                .iter()
+                .zip(expected)
+                .all(|(actual, expected)| actual == expected)
+    })
+}
+
+/// Replace only exact obsolete built-in values. A different URL or model list is a user
+/// choice and must survive provider catalog refreshes.
+fn migrate_obsolete_provider_defaults(cred: &mut crate::models::PlatformCredential) -> bool {
+    let mut changed = false;
+
+    if cred.platform_id == "kimi" {
+        if cred.base_url.as_deref() == Some("https://api.moonshot.cn/anthropic") {
+            cred.base_url = Some("https://api.moonshot.ai/anthropic".to_string());
+            changed = true;
+        }
+        if models_match(&cred.models, &["kimi-k2.5"])
+            || models_match(&cred.models, &["kimi-k2.5", "kimi-k2"])
+        {
+            cred.models = Some(vec![
+                "kimi-k3[1m]".to_string(),
+                "kimi-k2.7-code".to_string(),
+                "kimi-k2.7-code-highspeed".to_string(),
+            ]);
+            changed = true;
+        }
+    }
+
+    let stale_zhipu = ["glm-5.1", "glm-5-turbo", "glm-4.5-air"];
+    if matches!(cred.platform_id.as_str(), "zhipu" | "zhipu-intl")
+        && models_match(&cred.models, &stale_zhipu)
+    {
+        cred.models = Some(vec!["glm-5.3[1m]".to_string(), "glm-4.7".to_string()]);
+        changed = true;
+    }
+
+    if cred.platform_id == "bailian"
+        && models_match(&cred.models, &["qwen3.5-plus", "qwen3-coder-next"])
+    {
+        cred.models = Some(vec![
+            "qwen3.7-plus".to_string(),
+            "qwen3-coder-next".to_string(),
+        ]);
+        changed = true;
+    }
+    if cred.platform_id == "bailian-api"
+        && models_match(&cred.models, &["qwen3.5-plus", "qwen3-coder-next"])
+    {
+        cred.models = Some(vec![
+            "qwen3.8-max".to_string(),
+            "qwen3.7-plus".to_string(),
+            "qwen3-coder-next".to_string(),
+        ]);
+        changed = true;
+    }
+
+    if cred.platform_id == "longcat" && models_match(&cred.models, &["LongCat-2.0-Preview"]) {
+        cred.models = Some(vec!["LongCat-2.0".to_string()]);
+        changed = true;
+    }
+
+    changed
+}
+
 /// Migrate stale platform credential data. Returns true if any changes were made.
 ///
 /// Fixes:
@@ -355,6 +433,14 @@ fn migrate_platform_credentials(settings: &mut AllSettings) -> bool {
     let mut changed = false;
 
     for cred in &mut settings.user.platform_credentials {
+        if migrate_obsolete_provider_defaults(cred) {
+            log::info!(
+                "[storage/settings] migrated obsolete built-in defaults for '{}'",
+                cred.platform_id
+            );
+            changed = true;
+        }
+
         // Fix auth_env_var
         for &(pid, correct) in auth_fixes {
             if cred.platform_id == pid && cred.auth_env_var.as_deref() != Some(correct) {
@@ -419,6 +505,19 @@ fn migrate_platform_credentials(settings: &mut AllSettings) -> bool {
                     changed = true;
                 }
             }
+        }
+    }
+
+    if let Some(provider) = settings.user.codex_provider.as_mut() {
+        if provider.id == "vercel"
+            && provider.model == "openai/gpt-5.5"
+            && provider.base_url == "https://ai-gateway.vercel.sh/v1"
+            && provider.env_key == "AI_GATEWAY_API_KEY"
+            && provider.wire_api == "responses"
+        {
+            log::info!("[storage/settings] migrating Vercel Codex default model to GPT-5.6 Sol");
+            provider.model = "openai/gpt-5.6-sol".to_string();
+            changed = true;
         }
     }
 
@@ -847,7 +946,7 @@ pub fn update_agent_settings(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{AllSettings, PlatformCredential};
+    use crate::models::{AllSettings, CodexProviderCredential, PlatformCredential};
 
     fn make_settings_with_cred(cred: PlatformCredential) -> AllSettings {
         let mut s = AllSettings::default();
@@ -888,6 +987,33 @@ mod tests {
     }
 
     #[test]
+    fn provider_info_bedrock_matches_frontend_defaults() {
+        let info = get_provider_info("bedrock").expect("bedrock should have provider info");
+
+        assert!(info.key_optional);
+        assert!(info.base_url.is_none());
+        assert_eq!(
+            info.models.as_deref(),
+            Some(
+                [
+                    "us.anthropic.claude-opus-4-8".to_string(),
+                    "us.anthropic.claude-sonnet-4-6".to_string(),
+                    "us.anthropic.claude-haiku-4-5-20251001-v1:0".to_string(),
+                ]
+                .as_slice()
+            )
+        );
+        let env = info
+            .extra_env
+            .expect("bedrock should have default environment");
+        assert_eq!(
+            env.get("CLAUDE_CODE_USE_BEDROCK").map(String::as_str),
+            Some("1")
+        );
+        assert_eq!(env.get("AWS_REGION").map(String::as_str), Some("us-east-1"));
+    }
+
+    #[test]
     fn provider_info_ccr() {
         let info = get_provider_info("ccr").expect("ccr should have provider info");
         assert!(info.key_optional);
@@ -898,6 +1024,88 @@ mod tests {
                 .and_then(|m| m.first())
                 .map(|s| s.as_str()),
             Some("claude-sonnet-4-6")
+        );
+    }
+
+    #[test]
+    fn migrate_exact_obsolete_defaults_without_overwriting_custom_values() {
+        let stale = PlatformCredential {
+            platform_id: "kimi".to_string(),
+            api_key: None,
+            base_url: Some("https://api.moonshot.cn/anthropic".to_string()),
+            auth_env_var: Some("ANTHROPIC_AUTH_TOKEN".to_string()),
+            name: None,
+            models: Some(vec!["kimi-k2.5".to_string()]),
+            extra_env: None,
+        };
+        let custom = PlatformCredential {
+            platform_id: "kimi".to_string(),
+            api_key: None,
+            base_url: Some("https://gateway.example/anthropic".to_string()),
+            auth_env_var: Some("ANTHROPIC_AUTH_TOKEN".to_string()),
+            name: None,
+            models: Some(vec!["my-kimi-deployment".to_string()]),
+            extra_env: None,
+        };
+        let mut settings = AllSettings::default();
+        settings.user.platform_credentials = vec![stale, custom];
+
+        assert!(migrate_platform_credentials(&mut settings));
+        let stale = &settings.user.platform_credentials[0];
+        assert_eq!(
+            stale.base_url.as_deref(),
+            Some("https://api.moonshot.ai/anthropic")
+        );
+        assert_eq!(
+            stale.models.as_ref().unwrap(),
+            &["kimi-k3[1m]", "kimi-k2.7-code", "kimi-k2.7-code-highspeed"]
+        );
+
+        let custom = &settings.user.platform_credentials[1];
+        assert_eq!(
+            custom.base_url.as_deref(),
+            Some("https://gateway.example/anthropic")
+        );
+        assert_eq!(custom.models.as_ref().unwrap(), &["my-kimi-deployment"]);
+    }
+
+    #[test]
+    fn migrate_exact_vercel_codex_default() {
+        let mut settings = AllSettings::default();
+        settings.user.codex_provider = Some(CodexProviderCredential {
+            id: "vercel".to_string(),
+            name: "Vercel AI Gateway".to_string(),
+            base_url: "https://ai-gateway.vercel.sh/v1".to_string(),
+            env_key: "AI_GATEWAY_API_KEY".to_string(),
+            wire_api: "responses".to_string(),
+            model: "openai/gpt-5.5".to_string(),
+            api_key: None,
+        });
+
+        assert!(migrate_platform_credentials(&mut settings));
+        assert_eq!(
+            settings.user.codex_provider.unwrap().model,
+            "openai/gpt-5.6-sol"
+        );
+    }
+
+    #[test]
+    fn preserve_custom_vercel_codex_provider() {
+        let mut settings = AllSettings::default();
+        settings.user.codex_provider = Some(CodexProviderCredential {
+            id: "vercel".to_string(),
+            name: "Private Vercel Gateway".to_string(),
+            base_url: "https://gateway.example/v1".to_string(),
+            env_key: "PRIVATE_GATEWAY_KEY".to_string(),
+            wire_api: "responses".to_string(),
+            model: "openai/gpt-5.5".to_string(),
+            api_key: None,
+        });
+
+        assert!(!migrate_platform_credentials(&mut settings));
+        assert_eq!(
+            settings.user.codex_provider.unwrap().model,
+            "openai/gpt-5.5"
         );
     }
 
@@ -1002,6 +1210,7 @@ mod tests {
 
     #[test]
     fn is_key_optional_known_platforms() {
+        assert!(is_key_optional_platform("bedrock"));
         assert!(is_key_optional_platform("ccswitch"));
         assert!(is_key_optional_platform("ccr"));
         assert!(is_key_optional_platform("ollama"));

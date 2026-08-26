@@ -1939,6 +1939,7 @@ fn token_usage_event(run_id: &str, params: &Value) -> Option<BusEvent> {
         cache_read_tokens: cached,
         cache_write_tokens: None,
         total_cost_usd: 0.0,
+        cost_available: false,
         turn_index: None,
         model_usage: None,
         duration_api_ms: None,

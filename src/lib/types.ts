@@ -375,6 +375,7 @@ export interface RunUsageSummary {
   startedAt: string;
   endedAt?: string;
   totalCostUsd: number;
+  costAvailable: boolean;
   inputTokens: number;
   outputTokens: number;
   cacheReadTokens: number;
@@ -393,12 +394,14 @@ export interface ModelAggregate {
   cacheReadTokens: number;
   cacheWriteTokens: number;
   costUsd: number;
+  costComplete: boolean;
   pct: number;
 }
 
 export interface DailyAggregate {
   date: string;
   costUsd: number;
+  costComplete: boolean;
   runs: number;
   inputTokens: number;
   outputTokens: number;
@@ -421,6 +424,7 @@ export interface ModelTokens {
 
 export interface UsageOverview {
   totalCostUsd: number;
+  costComplete: boolean;
   totalTokens: number;
   totalRuns: number;
   avgCostPerRun: number;
@@ -884,6 +888,7 @@ export interface SessionInfoData {
   permissionMode: string;
   fastModeState: string;
   cost: number;
+  costAvailable: boolean;
   inputTokens: number;
   outputTokens: number;
   cacheReadTokens: number;
@@ -983,6 +988,7 @@ export type BusEvent =
       cache_read_tokens?: number;
       cache_write_tokens?: number;
       total_cost_usd: number;
+      cost_available?: boolean;
       /** Backend-authoritative turn index (1-based). Present for user turns. */
       turn_index?: number;
       model_usage?: Record<string, ModelUsageEntry>;
@@ -1635,6 +1641,7 @@ export interface RunSearchResult {
   toolCallCount: number;
   filesTouchedCount: number;
   totalCostUsd: number;
+  costAvailable: boolean;
   inputTokens: number;
   outputTokens: number;
   durationMs: number;
@@ -1656,6 +1663,7 @@ export interface RunSearchFacets {
   dateRange: [string, string];
   totalRuns: number;
   totalCost: number;
+  costComplete: boolean;
 }
 
 export interface RunSearchResponse {

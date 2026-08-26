@@ -19,6 +19,7 @@ export interface UsageState {
   cacheReadTokens: number;
   cacheWriteTokens: number;
   cost: number;
+  costAvailable: boolean;
   modelUsage?: Record<string, import("$lib/types").ModelUsageEntry>;
   durationApiMs?: number;
 }
@@ -32,6 +33,7 @@ export interface TurnUsage {
   cacheReadTokens: number;
   cacheWriteTokens: number;
   cost: number;
+  costAvailable: boolean;
   durationApiMs?: number;
   /** Wall-clock duration for this turn (from result event's duration_ms). */
   durationMs?: number;
